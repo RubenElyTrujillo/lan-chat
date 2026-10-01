@@ -128,7 +128,6 @@ export default function App() {
     let registered = false;
     let off: (() => void) | undefined;
     runScan();
-    const id = setInterval(runScan, 5000);
     onMessage((msg) => pushEntry(msg.from, { mine: false, text: msg.text })).then((fn) => {
       if (cancelled) fn();
       else {
@@ -138,7 +137,6 @@ export default function App() {
     });
     return () => {
       cancelled = true;
-      clearInterval(id);
       if (registered) off?.();
     };
   }, [pushEntry, runScan]);
