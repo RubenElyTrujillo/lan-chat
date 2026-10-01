@@ -24,15 +24,10 @@ fn greet(name: &str) -> String {
 #[tauri::command]
 fn discover_devices() -> Vec<DiscoveredDevice> {
     let mdns = ServiceDaemon::new().expect("No se pudo crear el daemon mDNS");
-    let service_types = [
-        "_lanchat._tcp.local.",
-        "_airplay._tcp.local.",
-        "_googlecast._tcp.local.",
-        "_ipp._tcp.local.",
-        "_http._tcp.local.",
-    ];
+    let service_types = ["_lanchat._tcp.local."];
 
     let mut devices: Vec<DiscoveredDevice> = Vec::new();
+    let my_fullname = format!("{}._lanchat._tcp.local.", device_name());
 
     for service_type in service_types {
         let receiver = mdns.browse(service_type).expect("Fallo el browse");
@@ -41,19 +36,21 @@ fn discover_devices() -> Vec<DiscoveredDevice> {
         while std::time::Instant::now() < deadline {
             if let Ok(event) = receiver.recv_timeout(std::time::Duration::from_millis(200)) {
                 if let ServiceEvent::ServiceResolved(info) = event {
-                    if let Some(ip) = info
-                        .get_addresses()
-                        .iter()
-                        .find(|ip| ip.is_ipv4() && !ip.is_loopback())
-                    {
-                        let device = DiscoveredDevice {
-                            name: info.get_fullname().to_string(),
-                            ip: ip.to_string(),
-                            service: service_type.to_string(),
-                        };
+                    if info.get_fullname() != my_fullname {
+                        if let Some(ip) = info
+                            .get_addresses()
+                            .iter()
+                            .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+                        {
+                            let device = DiscoveredDevice {
+                                name: info.get_fullname().to_string(),
+                                ip: ip.to_string(),
+                                service: service_type.to_string(),
+                            };
 
-                        if !devices.iter().any(|d| d.name == device.name) {
-                            devices.push(device);
+                            if !devices.iter().any(|d| d.name == device.name) {
+                                devices.push(device);
+                            }
                         }
                     }
                 }

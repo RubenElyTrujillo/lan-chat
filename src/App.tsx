@@ -16,6 +16,7 @@ function App() {
 
   async function discoverDevices() {
     const resultados = await invoke("discover_devices");
+    console.log("Dispositivos descubiertos:", resultados);
     setDevices(resultados as DiscoveredDevice[]);
   }
 
@@ -50,7 +51,7 @@ function App() {
                 placeholder="Mensaje..."
               />
               <button onClick={sendText} disabled={!selected}>
-                Enviar a {selected ? selected.name : "—"}
+                Enviar a {selected ? selected.name.split(".")[0] : "—"}
               </button>
             </div>
           </li>
