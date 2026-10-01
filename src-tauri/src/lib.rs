@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 fn device_name() -> String {
     std::env::var("DEVICE_NAME") // override para pruebas: DEVICE_NAME=xxx al lanzar
@@ -16,13 +17,19 @@ struct DiscoveredDevice {
     service: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct ChatMessage {
+    from: String,
+    text: String,
+}
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
 #[tauri::command]
-fn discover_devices() -> Vec<DiscoveredDevice> {
+async fn discover_devices() -> Vec<DiscoveredDevice> {
     let mdns = ServiceDaemon::new().expect("No se pudo crear el daemon mDNS");
     let service_types = ["_lanchat._tcp.local."];
 
@@ -65,10 +72,12 @@ fn discover_devices() -> Vec<DiscoveredDevice> {
 fn send_text(ip: String, texto: String) -> Result<(), String> {
     use std::io::Write;
 
+    let payload = serde_json::json!({ "from": device_name(), "text": texto });
+
     let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
         .map_err(|e| format!("No se pudo conectar: {e}"))?;
 
-    let mensaje = format!("{texto}\n");
+    let mensaje = format!("{payload}\n");
     stream
         .write_all(mensaje.as_bytes())
         .map_err(|e| format!("No se pudo enviar: {e}"))?;
@@ -80,7 +89,7 @@ fn send_text(ip: String, texto: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .setup(|_app| {
+        .setup(|app| {
             let mdns = ServiceDaemon::new().expect("No se pudo crear el daemon mDNS");
             let name = device_name();
 
@@ -96,8 +105,9 @@ pub fn run() {
             .enable_addr_auto();
 
             mdns.register(service_info).expect("No se pudo anunciar");
+            let handle = app.handle().clone();
 
-            std::thread::spawn(|| {
+            std::thread::spawn(move || {
                 let listener = std::net::TcpListener::bind("0.0.0.0:8787")
                     .expect("No se pudo abrir el puerto 8787");
                 println!("LAN-Chat escuchando en el puerto 8787");
@@ -108,7 +118,21 @@ pub fn run() {
                     use std::io::BufRead;
                     for line in reader.lines() {
                         match line {
-                            Ok(texto) => println!("Mensaje recibido: {texto}"),
+                            Ok(texto) => {
+                                match serde_json::from_str::<ChatMessage>(&texto) {
+                                    Ok(msg) => println!("{} dice: {}", msg.from, msg.text),
+                                    Err(_) => println!("Mensaje sin remitente: {texto}"),
+                                }
+                                let _ = handle.emit(
+                                    "message-received",
+                                    serde_json::from_str::<ChatMessage>(&texto).unwrap_or(
+                                        ChatMessage {
+                                            from: "?".into(),
+                                            text: texto.clone(),
+                                        },
+                                    ),
+                                );
+                            }
                             Err(_) => break,
                         }
                     }

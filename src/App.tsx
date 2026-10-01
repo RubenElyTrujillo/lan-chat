@@ -1,64 +1,270 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MessageSquare, Wifi } from "lucide-react";
+import { DeviceList } from "./components/DeviceList";
+import { Conversation } from "./components/Conversation";
+import {
+  demoRequested,
+  discover,
+  isTauri,
+  onMessage,
+  sendText,
+  type RawDevice,
+} from "./lib/backend";
+import { DEMO_DEVICES, demoHistory, runDemoSim } from "./lib/demo";
+import { loadHistory, saveHistory } from "./lib/history";
+import { displayName, type DeviceState, type Entry, type History } from "./types";
 
-interface DiscoveredDevice {
-  name: string;
-  ip: string;
-  service: string;
+const DEMO = typeof window === "undefined" || !isTauri() || demoRequested();
+
+interface EntryDraft {
+  mine: boolean;
+  text: string;
+  state?: Entry["state"];
 }
 
-function App() {
-  const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
-  const [selected, setSelected] = useState<DiscoveredDevice | null>(null);
-  const [texto, setTexto] = useState("");
+export default function App() {
+  const [devices, setDevices] = useState<DeviceState[]>([]);
+  const [history, setHistory] = useState<History>({});
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(true);
+  const [narrow, setNarrow] = useState(false);
 
-  async function discoverDevices() {
-    const resultados = await invoke("discover_devices");
-    console.log("Dispositivos descubiertos:", resultados);
-    setDevices(resultados as DiscoveredDevice[]);
-  }
+  const devicesRef = useRef<DeviceState[]>([]);
+  const loadedRef = useRef(false);
+  const animateRef = useRef<Map<string, number>>(new Map());
+  const scanningRef = useRef(false);
 
-  async function sendText() {
-    if (!selected) return;
-    try {
-      await invoke("send_text", { ip: selected.ip, texto });
-      setTexto("");
-    } catch (e) {
-      console.error("Error al enviar:", e);
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 700px)");
+    const apply = () => setNarrow(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
+  const pushEntry = useCallback((key: string, draft: EntryDraft) => {
+    const entry: Entry = {
+      id: crypto.randomUUID(),
+      at: Date.now(),
+      state: draft.mine ? "sending" : undefined,
+      ...draft,
+    };
+    setHistory((h) => ({ ...h, [key]: [...(h[key] ?? []), entry] }));
+    setDevices((prev) =>
+      prev.some((d) => d.key === key)
+        ? prev
+        : [...prev, { key, name: displayName(key), online: false }],
+    );
+  }, []);
+
+  const patchEntry = useCallback((key: string, id: string, state: Entry["state"]) => {
+    setHistory((h) => ({
+      ...h,
+      [key]: (h[key] ?? []).map((e) => (e.id === id ? { ...e, state } : e)),
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (DEMO) {
+      setDevices(DEMO_DEVICES);
+      setHistory(demoHistory());
+      setScanning(false);
+      return runDemoSim(
+        (device) =>
+          setDevices((prev) =>
+            prev.some((d) => d.key === device.key)
+              ? prev.map((d) => (d.key === device.key ? { ...d, online: true } : d))
+              : [...prev, device],
+          ),
+        (key, text) => pushEntry(key, { mine: false, text }),
+      );
     }
-  }
+    setHistory(loadHistory());
+    loadedRef.current = true;
+  }, [pushEntry]);
+
+  useEffect(() => {
+    if (DEMO || !loadedRef.current) return;
+    saveHistory(history);
+  }, [history]);
+
+  const applyScan = useCallback((found: RawDevice[]) => {
+    setDevices((prev) => {
+      const map = new Map(prev.map((d) => [d.key, { ...d }]));
+      const seen = new Set<string>();
+      for (const f of found) {
+        const key = displayName(f.name);
+        seen.add(key);
+        map.set(key, { key, name: displayName(f.name), ip: f.ip, online: true });
+      }
+      for (const [k, d] of map) {
+        if (!seen.has(k) && d.online) map.set(k, { ...d, online: false });
+      }
+      return [...map.values()];
+    });
+  }, []);
+
+  const runScan = useCallback(async () => {
+    if (DEMO || scanningRef.current) return;
+    scanningRef.current = true;
+    setScanning(true);
+    try {
+      applyScan(await discover());
+    } catch {
+      /* red no disponible: la lista queda como está */
+    } finally {
+      scanningRef.current = false;
+      setScanning(false);
+    }
+  }, [applyScan]);
+
+  useEffect(() => {
+    if (DEMO) return;
+    let cancelled = false;
+    let registered = false;
+    let off: (() => void) | undefined;
+    runScan();
+    const id = setInterval(runScan, 5000);
+    onMessage((msg) => pushEntry(msg.from, { mine: false, text: msg.text })).then((fn) => {
+      if (cancelled) fn();
+      else {
+        off = fn;
+        registered = true;
+      }
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      if (registered) off?.();
+    };
+  }, [pushEntry, runScan]);
+
+  const sorted = useMemo(() => {
+    const activity = (k: string) => history[k]?.[history[k].length - 1]?.at ?? 0;
+    return [...devices].sort(
+      (a, b) =>
+        Number(b.online) - Number(a.online) ||
+        activity(b.key) - activity(a.key) ||
+        a.name.localeCompare(b.name),
+    );
+  }, [devices, history]);
+
+  const selected = sorted.find((d) => d.key === selectedKey) ?? null;
+
+  const openConversation = useCallback((key: string) => {
+    animateRef.current.set(key, Date.now());
+    setSelectedKey(key);
+  }, []);
+
+  const send = useCallback(
+    async (key: string, text: string) => {
+      const device = devicesRef.current.find((d) => d.key === key);
+      const id = crypto.randomUUID();
+      setHistory((h) => ({
+        ...h,
+        [key]: [
+          ...(h[key] ?? []),
+          { id, mine: true, text, at: Date.now(), state: "sending" },
+        ],
+      }));
+      try {
+        if (device?.ip) await sendText(device.ip, text);
+        else if (device) await new Promise((r) => setTimeout(r, 400));
+        else throw new Error("desconocido");
+        patchEntry(key, id, "sent");
+      } catch {
+        patchEntry(key, id, "failed");
+      }
+    },
+    [patchEntry],
+  );
+
+  const retry = useCallback(
+    (key: string, id: string) => {
+      const entry = (history[key] ?? []).find((e) => e.id === id);
+      if (!entry) return;
+      patchEntry(key, id, "sending");
+      const device = devicesRef.current.find((d) => d.key === key);
+      const deliver = async () => {
+        try {
+          if (device?.ip) await sendText(device.ip, entry.text);
+          else if (device) await new Promise((r) => setTimeout(r, 400));
+          else throw new Error("desconocido");
+          patchEntry(key, id, "sent");
+        } catch {
+          patchEntry(key, id, "failed");
+        }
+      };
+      deliver();
+    },
+    [history, patchEntry],
+  );
+
+  const deleteConversation = useCallback((key: string) => {
+    setHistory((h) => {
+      const next = { ...h };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
+  const deleteAll = useCallback(() => setHistory({}), []);
 
   return (
-    <main className="container">
-      <div className="card">
-        <h1>LAN Chat</h1>
-        <p>Descubre dispositivos en la red local usando mDNS.</p>
-        <button onClick={discoverDevices}>Descubrir Dispositivos</button>
-      </div>
-      <ul>
-        {devices.map((device) => (
-          <li
-            key={device.ip + device.name}
-            onClick={() => setSelected(device)}
-            style={{ cursor: "pointer", fontWeight: device === selected ? "bold" : "normal" }}
-          >
-            <div className="row">
-              <input
-                value={texto}
-                onChange={(e) => setTexto(e.currentTarget.value)}
-                placeholder="Mensaje..."
-              />
-              <button onClick={sendText} disabled={!selected}>
-                Enviar a {selected ? selected.name.split(".")[0] : "—"}
-              </button>
+    <div className="app">
+      <header className="topbar">
+        <span className="app-mark" aria-hidden>
+          <MessageSquare size={15} strokeWidth={2.2} />
+        </span>
+        <span className="app-name">LAN-Chat</span>
+        <span className="topbar-spacer" />
+        {DEMO ? (
+          <span className="demo-badge">Demostración</span>
+        ) : (
+          <span className="net-chip">
+            <Wifi size={13} aria-hidden />
+            Red local
+          </span>
+        )}
+      </header>
+
+      <div className={`shell ${narrow && selected ? "show-conv" : ""}`}>
+        <DeviceList
+          devices={sorted}
+          history={history}
+          scanning={scanning}
+          selectedKey={selectedKey}
+          onSelect={openConversation}
+          onRescan={runScan}
+          onDeleteAll={deleteAll}
+        />
+        {selected ? (
+          <Conversation
+            key={selected.key}
+            device={selected}
+            entries={history[selected.key] ?? []}
+            animateAfter={animateRef.current.get(selected.key) ?? 0}
+            onBack={() => setSelectedKey(null)}
+            onSend={(text) => send(selected.key, text)}
+            onRetry={(id) => retry(selected.key, id)}
+            onDelete={() => deleteConversation(selected.key)}
+          />
+        ) : (
+          <section className="conv-col" aria-label="Bienvenida">
+            <div className="welcome">
+              <h1>Pasá texto entre tus equipos</h1>
+              <p>
+                Sin internet, sin cuentas. Los dispositivos de tu misma red aparecen solos en la
+                lista; elegí uno y escribí.
+              </p>
             </div>
-          </li>
-        ))}
-      </ul>
-    </main>
+          </section>
+        )}
+      </div>
+    </div>
   );
 }
-
-export default App;

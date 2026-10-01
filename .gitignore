@@ -26,3 +26,8 @@ dist-ssr
 # Tauri / Rust build artifacts
 src-tauri/target
 src-tauri/gen/schemas
+
+# Tool artifacts locales
+.atl/
+.impeccable/
+.playwright-mcp/

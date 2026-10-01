@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "lan-chat",
-        "width": 800,
-        "height": 600
+        "title": "LAN-Chat",
+        "width": 1160,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 500
       }
     ],
     "security": {
