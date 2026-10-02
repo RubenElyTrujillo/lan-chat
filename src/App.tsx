@@ -12,6 +12,7 @@ import {
   onFile,
   onMessage,
   onReadAck,
+  probePort,
   sendAck,
   sendFile,
   sendText,
@@ -269,6 +270,29 @@ export default function App() {
       offs.forEach((fn) => fn());
     };
   }, [pushEntry, runScan, notifyRead]);
+
+  // Outbox activo: mientras haya mensajes fallidos, tocar la puerta del
+  // dispositivo cada 10s; cuando responde, reenviar todo lo pendiente.
+  useEffect(() => {
+    if (DEMO) return;
+    const t = setInterval(async () => {
+      for (const [key, entries] of Object.entries(historyRef.current)) {
+        const failed = entries.filter((e) => e.state === "failed");
+        if (failed.length === 0) continue;
+        const device = devicesRef.current.find((d) => d.key === key);
+        if (!device?.ip) continue;
+        try {
+          const open = await probePort(device.ip);
+          if (open) {
+            for (const e of failed) retryRef.current(key, e.id);
+          }
+        } catch {
+          /* sin conexión todavía */
+        }
+      }
+    }, 10_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Palomitas azules: el otro lado vio los mensajes.
   useEffect(() => {

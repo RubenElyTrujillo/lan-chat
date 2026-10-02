@@ -3,6 +3,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -190,14 +191,30 @@ async fn send_file(
 
 /// Acuse de recibo: el receptor responde por el mismo socket.
 #[tauri::command]
-async fn send_ack(ip: String, payload: String) -> Result<(), String> {
-    use std::io::Write;
+async fn send_ack(ip: String, payload: String) -> Result<(), String> {    use std::io::Write;
     let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
         .map_err(|e| format!("No se pudo conectar: {e}"))?;
     stream
         .write_all(format!("{payload}\n").as_bytes())
         .map_err(|e| format!("No se pudo enviar: {e}"))?;
     Ok(())
+}
+
+/// Sondeo rápido: ¿el dispositivo tiene su puerta abierta?
+#[tauri::command]
+async fn probe_port(ip: String, port: u16) -> bool {
+    let targets = match (ip.as_str(), port).to_socket_addrs() {
+        Ok(i) => i.collect::<Vec<_>>(),
+        Err(_) => return false,
+    };
+    for addr in targets {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800))
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[tauri::command]
@@ -499,6 +516,7 @@ pub fn run() {    tauri::Builder::default()
             send_text,
             send_file,
             send_ack,
+            probe_port,
             get_download_folder,
             set_download_folder,
             load_history,

@@ -37,6 +37,10 @@ export function sendAck(ip: string, payload: string): Promise<void> {
   return invoke("send_ack", { ip, payload });
 }
 
+export function probePort(ip: string, port = 8787): Promise<boolean> {
+  return invoke<boolean>("probe_port", { ip, port });
+}
+
 export interface RawReadAck {
   from: string;
   ids: string[];
