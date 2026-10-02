@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LAN-Chat · red local</title>
+    <style>
+      :root {
+        --bg: #14161a;
+        --panel: #1b1d21;
+        --line: rgba(255, 255, 255, 0.08);
+        --text: #f2f3f5;
+        --dim: rgba(242, 243, 245, 0.6);
+        --accent: #4fb6ec;
+        --mine: #2b5278;
+        --theirs: #26282e;
+        --danger: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        padding: 14px;
+        gap: 12px;
+      }
+      header { display: flex; align-items: center; gap: 10px; }
+      header h1 { font-size: 15px; margin: 0; }
+      header span { font-size: 11px; color: var(--dim); }
+      .hidden { display: none !important; }
+      input {
+        padding: 11px 13px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        font-size: 15px;
+        letter-spacing: 3px;
+        outline: none;
+        text-align: center;
+      }
+      input:focus { border-color: var(--accent); }
+      .landing, .pairing {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 12px;
+        max-width: 420px;
+        width: 100%;
+        margin: 0 auto;
+      }
+      .landing p { color: var(--dim); font-size: 13px; margin: 0; }
+      .devices {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 60px;
+      }
+      .device {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 14px;
+        border-radius: 12px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        color: var(--text);
+        font-size: 14.5px;
+        cursor: pointer;
+        text-align: left;
+      }
+      .device:active { border-color: var(--accent); }
+      .device .dot {
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        background: #37d67a;
+      }
+      .device .ip { margin-left: auto; font-size: 11px; color: var(--dim); }
+      .device .hub-tag {
+        font-size: 10px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: var(--accent);
+        color: #0d1117;
+        font-weight: 700;
+      }
+      .pill {
+        padding: 11px 16px;
+        border-radius: 999px;
+        border: none;
+        background: var(--accent);
+        color: #0d1117;
+        font-weight: 700;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .pill-ghost {
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        color: var(--text);
+      }
+      .hint { color: var(--dim); font-size: 12.5px; line-height: 1.5; }
+      .err { color: var(--danger); font-size: 12.5px; min-height: 16px; }
+      .thread {
+        flex: 1;
+        overflow-y: auto;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .row { display: flex; max-width: 82%; }
+      .row.mine { align-self: flex-end; }
+      .row.sys { align-self: center; font-size: 11.5px; color: var(--dim); }
+      .bubble {
+        padding: 8px 12px;
+        border-radius: 14px;
+        background: var(--theirs);
+        font-size: 14px;
+        line-height: 1.45;
+        word-break: break-word;
+      }
+      .mine .bubble { background: var(--mine); }
+      .from { display: block; font-size: 11px; font-weight: 700; color: var(--accent); margin-bottom: 2px; }
+      .meta { display: block; font-size: 10px; opacity: 0.6; text-align: right; margin-top: 2px; }
+      .file {
+        display: flex;
+        gap: 8px;
+        padding: 7px 9px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.07);
+        margin-bottom: 4px;
+        color: var(--text);
+        text-decoration: none;
+        font-size: 13px;
+      }
+      footer { display: flex; gap: 8px; }
+      footer input {
+        flex: 1;
+        letter-spacing: normal;
+        text-align: left;
+      }
+      footer .pill { padding: 10px 18px; }
+      .att {
+        padding: 0 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: transparent;
+        color: var(--text);
+        font-size: 16px;
+        cursor: pointer;
+      }
+      body.is-dragging::after {
+        content: "Soltá para enviar al escritorio";
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: rgba(10, 11, 13, 0.75);
+        font-size: 17px;
+        font-weight: 600;
+        z-index: 50;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LAN-Chat</h1>
+      <span>red local · nada se guarda acá</span>
+    </header>
+
+    <!-- 1) Dispositivos -->
+    <div class="landing" id="devices-screen">
+      <p>¿A quién le querés mandar cosas? Tocá un dispositivo para vincular.</p>
+      <div class="devices" id="device-list">
+        <div class="hint">Buscando dispositivos en tu red…</div>
+      </div>
+      <button class="pill pill-ghost" id="btn-rescan">Volver a buscar</button>
+      <div class="err" id="devices-err"></div>
+    </div>
+
+    <!-- 2) Vinculación -->
+    <div class="pairing hidden" id="pairing-screen">
+      <p id="pairing-title">Vinculando…</p>
+      <p class="hint">
+        En la pantalla del otro dispositivo va a aparecer un código de 6 dígitos.
+        Escribilo acá para confirmar.
+      </p>
+      <input id="pair-code" placeholder="CÓDIGO" maxlength="6" inputmode="numeric" />
+      <button class="pill" id="btn-pair">Vincular</button>
+      <button class="pill pill-ghost" id="btn-pair-cancel">Cancelar</button>
+      <div class="err" id="pairing-err"></div>
+    </div>
+
+    <!-- 3) Chat -->
+    <div class="thread hidden" id="thread"></div>
+
+    <footer class="hidden" id="bar">
+      <button class="att" id="attach">📎</button>
+      <input id="msg" placeholder="Escribe un mensaje" autocomplete="off" />
+      <button class="pill" id="send">Enviar</button>
+      <input type="file" id="file" hidden />
+    </footer>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let ws = null;
+      let myName = null;
+      let target = null; // dispositivo elegido
+
+      const PAIRED_KEY = "lanchat.lan.paired";
+      const isPaired = () => localStorage.getItem(PAIRED_KEY) === "1";
+      const unpair = () => localStorage.removeItem(PAIRED_KEY);
+
+      // ── Pantalla de dispositivos ────────────────────────
+      async function loadDevices() {
+        $("device-list").innerHTML =
+          '<div class="hint">Buscando dispositivos en tu red…</div>';
+        $("devices-err").textContent = "";
+        try {
+          const res = await fetch("/api/devices");
+          const data = await res.json();
+          $("device-list").innerHTML = "";
+          for (const d of data.devices) {
+            const btn = document.createElement("button");
+            btn.className = "device";
+            btn.innerHTML = `<span class="dot"></span><span>${esc(d.name)}</span>
+              ${d.hub ? '<span class="hub-tag">este equipo</span>' : ""}
+              <span class="ip">${esc(d.ip)}</span>`;
+            btn.onclick = () => startPairing(d);
+            $("device-list").appendChild(btn);
+          }
+          if (data.devices.length === 0) {
+            $("device-list").innerHTML =
+              '<div class="hint">No hay dispositivos corriendo LAN-Chat en tu red.</div>';
+          }
+        } catch {
+          $("device-list").innerHTML =
+            '<div class="hint">No se pudo escanear la red.</div>';
+        }
+      }
+      $("btn-rescan").onclick = loadDevices;
+
+      // ── Vinculación ─────────────────────────────────────
+      function startPairing(device) {
+        target = device;
+        $("devices-screen").classList.add("hidden");
+        $("pairing-screen").classList.remove("hidden");
+        $("pairing-title").textContent = `Vincular con ${device.name}`;
+        $("pair-code").value = "";
+        $("pairing-err").textContent = "";
+        fetch("/api/pair-request", { method: "POST" });
+      }
+      $("btn-pair-cancel").onclick = () => {
+        $("pairing-screen").classList.add("hidden");
+        $("devices-screen").classList.remove("hidden");
+      };
+
+      async function doPair() {
+        const code = $("pair-code").value.trim();
+        if (code.length < 4) return;
+        try {
+          const res = await fetch("/api/pair", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code }),
+          });
+          const data = await res.json();
+          if (!data.ok) {
+            $("pairing-err").textContent = data.error || "Código incorrecto";
+            return;
+          }
+          localStorage.setItem(PAIRED_KEY, "1");
+          openChat();
+        } catch {
+          $("pairing-err").textContent = "No se pudo verificar";
+        }
+      }
+      $("btn-pair").onclick = doPair;
+      $("pair-code").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doPair();
+      });
+
+      // ── Chat ────────────────────────────────────────────
+      function openChat() {
+        $("pairing-screen").classList.add("hidden");
+        $("devices-screen").classList.add("hidden");
+        $("thread").classList.remove("hidden");
+        $("bar").classList.remove("hidden");
+        connectWs();
+      }
+
+      function connectWs() {
+        myName = "navegador";
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(`${proto}://${location.host}/ws`);
+        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", name: myName }));
+        ws.onmessage = (e) => handle(JSON.parse(e.data));
+        ws.onclose = () => addRow("sys", "Conexión cerrada. Recargá para volver.");
+      }
+
+      function handle(m) {
+        if (m.type === "welcome") {
+          addRow("sys", "Vinculado. Todo queda en tu red y nada se guarda acá.");
+          return;
+        }
+        if (m.type === "chat") {
+          if (m.to && m.to !== myName) return;
+          addRow(m.from === myName ? "mine" : "", m.text, m.from);
+        }
+        if (m.type === "file") {
+          if (m.to && m.to !== myName) return;
+          addFile(m.from, m.name, m.url, m.size);
+        }
+      }
+
+      function esc(s) {
+        const d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
+      }
+
+      function addRow(kind, text, from) {
+        const row = document.createElement("div");
+        row.className = `row ${kind}`;
+        if (kind === "sys") {
+          row.textContent = text;
+        } else {
+          const b = document.createElement("div");
+          b.className = "bubble";
+          const meta = new Date().toLocaleTimeString("es", {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+          b.innerHTML = `<span class="from">${esc(from || "")}</span>${esc(text)}<span class="meta">${meta}</span>`;
+          b.onclick = async () => {
+            try {
+              await navigator.clipboard.writeText(text);
+              b.querySelector(".meta").textContent = "copiado ✓";
+              setTimeout(() => {
+                b.querySelector(".meta").textContent = meta;
+              }, 1200);
+            } catch {
+              /* requiere https */
+            }
+          };
+          row.appendChild(b);
+        }
+        $("thread").appendChild(row);
+        $("thread").scrollTop = $("thread").scrollHeight;
+      }
+
+      function addFile(from, name, url, size) {
+        const row = document.createElement("div");
+        row.className = `row ${from === myName ? "mine" : ""}`;
+        const kb =
+          size > 1048576 ? (size / 1048576).toFixed(1) + " MB" : Math.ceil(size / 1024) + " KB";
+        const b = document.createElement("div");
+        b.className = "bubble";
+        b.innerHTML = `<span class="from">${esc(from)}</span>
+          <a class="file" href="${esc(url)}" download="true">📎 ${esc(name)} · ${kb} — tocá para descargar</a>`;
+        row.appendChild(b);
+        $("thread").appendChild(row);
+        $("thread").scrollTop = $("thread").scrollHeight;
+      }
+
+      function sendChat() {
+        const v = $("msg").value.trim();
+        if (!v || !ws) return;
+        ws.send(JSON.stringify({ type: "chat", text: v }));
+        $("msg").value = "";
+      }
+      $("send").onclick = sendChat;
+      $("msg").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") sendChat();
+      });
+
+      // ── Archivos ────────────────────────────────────────
+      $("attach").onclick = () => $("file").click();
+      $("file").onchange = () => {
+        const f = $("file").files[0];
+        if (f) upload(f);
+        $("file").value = "";
+      };
+
+      async function upload(f) {
+        if (f.size > 25 * 1048576) {
+          addRow("sys", "⚠️ Máximo 25 MB");
+          return;
+        }
+        addRow("sys", `⏳ Enviando ${f.name}…`);
+        const q = new URLSearchParams({ from: myName, name: f.name });
+        const res = await fetch(`/upload?${q}`, { method: "POST", body: f });
+        if (!res.ok) {
+          unpair();
+          addRow("sys", "⚠️ Se perdió la vinculación. Recargá para vincular de nuevo.");
+        }
+      }
+
+      let depth = 0;
+      window.addEventListener("dragenter", () => {
+        depth++;
+        document.body.classList.add("is-dragging");
+      });
+      window.addEventListener("dragleave", () => {
+        depth--;
+        if (depth <= 0) {
+          depth = 0;
+          document.body.classList.remove("is-dragging");
+        }
+      });
+      window.addEventListener("dragover", (e) => e.preventDefault());
+      window.addEventListener("drop", (e) => {
+        e.preventDefault();
+        depth = 0;
+        document.body.classList.remove("is-dragging");
+        for (const f of e.dataTransfer.files) upload(f);
+      });
+
+      // Arranque: si ya estaba vinculado con este equipo, directo al chat.
+      if (isPaired()) {
+        openChat();
+      } else {
+        loadDevices();
+      }
+    </script>
+  </body>
+</html>

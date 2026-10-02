@@ -7,6 +7,18 @@ use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        DefaultBodyLimit, Path as AxPath, Query, State as AxState,
+    },
+    response::{Html, IntoResponse},
+    routing::{get, post},
+    Json, Router,
+};
+
+const LAN_CLIENT: &str = include_str!("lan_client.html");
+
 fn device_name() -> String {
     std::env::var("DEVICE_NAME") // override para pruebas: DEVICE_NAME=xxx al lanzar
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -45,6 +57,11 @@ struct AppState {
     db: Mutex<Connection>,
     own_pin: Mutex<String>,
     session_pin: Mutex<Option<(String, std::time::Instant)>>,
+    handle: tauri::AppHandle,
+    web_tx: tokio::sync::broadcast::Sender<String>,
+    web_files: Mutex<HashMap<String, (String, Vec<u8>)>>,
+    web_sessions: Mutex<Vec<String>>,
+    web_paired: Mutex<bool>,
 }
 
 /// Espejo Rust de una entrada del historial (mismos campos que Entry en TS).
@@ -68,9 +85,10 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-#[tauri::command]
-async fn discover_devices() -> Vec<DiscoveredDevice> {
-    let mdns = ServiceDaemon::new().expect("No se pudo crear el daemon mDNS");
+fn scan_lan_devices() -> Vec<DiscoveredDevice> {
+    let Ok(mdns) = ServiceDaemon::new() else {
+        return Vec::new();
+    };
     let service_types = ["_lanchat._tcp.local."];
 
     let mut devices: Vec<DiscoveredDevice> = Vec::new();
@@ -106,6 +124,11 @@ async fn discover_devices() -> Vec<DiscoveredDevice> {
         let _ = mdns.stop_browse(service_type);
     }
     devices
+}
+
+#[tauri::command]
+async fn discover_devices() -> Vec<DiscoveredDevice> {
+    scan_lan_devices()
 }
 
 #[tauri::command]
@@ -442,6 +465,329 @@ async fn pair_verify(
         }
     }
 }
+#[tauri::command]
+fn send_web(state: tauri::State<Arc<AppState>>, name: String, text: String) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "type": "chat",
+        "from": device_name(),
+        "to": name,
+        "text": text
+    });
+    state
+        .web_tx
+        .send(payload.to_string())
+        .map_err(|_| "No hay navegadores conectados".to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn send_web_file(
+    state: tauri::State<Arc<AppState>>,
+    name: String,
+    path: String,
+) -> Result<(), String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("No se pudo leer: {e}"))?;
+    if bytes.len() > 25 * 1024 * 1024 {
+        return Err("Para web el máximo es 25 MB".into());
+    }
+    let fname = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or("Ruta inválida")?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let fid = format!("d{nanos:x}");
+    state
+        .web_files
+        .lock()
+        .unwrap()
+        .insert(fid.clone(), (fname.clone(), bytes));
+    let payload = serde_json::json!({
+        "type": "file",
+        "from": device_name(),
+        "to": name,
+        "name": fname,
+        "url": format!("/f/{fid}"),
+        "size": state.web_files.lock().unwrap().get(&fid).map(|(_, b)| b.len()).unwrap_or(0)
+    });
+    state
+        .web_tx
+        .send(payload.to_string())
+        .map_err(|_| "No hay navegadores conectados".to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_lan_url() -> String {
+    let ip = std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| {
+            s.connect("8.8.8.8:80").ok()?;
+            s.local_addr().ok()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".into());
+    format!("http://{ip}:8789")
+}
+
+// ── Handlers del server LAN (axum) ─────────────────────────
+
+async fn lan_index() -> Html<&'static str> {
+    Html(LAN_CLIENT)
+}
+
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    AxState(state): AxState<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_loop(socket, state))
+}
+
+async fn ws_loop(socket: WebSocket, state: Arc<AppState>) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut sink, mut stream) = socket.split();
+
+    // Hello: el navegador se presenta.
+    let name = match stream.next().await {
+        Some(Ok(Message::Text(t))) => {
+            let v: serde_json::Value =
+                serde_json::from_str(&t).unwrap_or(serde_json::json!({}));
+            v["name"]
+                .as_str()
+                .unwrap_or("navegador")
+                .to_string()
+        }
+        _ => return,
+    };
+    let name = {
+        let mut sessions = state.web_sessions.lock().unwrap();
+        let mut candidate = name.clone();
+        let mut n = 1;
+        while sessions.iter().any(|x| x == &candidate) {
+            n += 1;
+            candidate = format!("{name} ({n})");
+        }
+        sessions.push(candidate.clone());
+        candidate
+    };
+    let _ = state.handle.emit(
+        "web-sessions",
+        serde_json::json!({ "list": state.web_sessions.lock().unwrap().clone() }),
+    );
+
+    let welcome = serde_json::json!({ "type": "welcome", "name": name });
+    if sink
+        .send(Message::Text(welcome.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = state.web_tx.subscribe(); // canal de difusión escritorio → navegadores
+
+    let mut rx = state.web_tx.subscribe();
+    loop {
+        tokio::select! {
+            out = rx.recv() => {
+                match out {
+                    Ok(text) => {
+                        let v: serde_json::Value = serde_json::from_str(&text)
+                            .unwrap_or(serde_json::json!({}));
+                        let to = v["to"].as_str();
+                        if to.is_none() || to == Some(name.as_str()) {
+                            if sink.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            incoming = stream.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(t))) => {
+                        let v: serde_json::Value = serde_json::from_str(&t)
+                            .unwrap_or(serde_json::json!({}));
+                        if v["type"] == "chat" {
+                            if !*state.web_paired.lock().unwrap() {
+                                continue;
+                            }
+                            let nanos = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0);
+                            let msg = ChatMessage {
+                                from: format!("web:{name}"),
+                                text: v["text"].as_str().unwrap_or("").to_string(),
+                                id: format!("web-{nanos:x}"),
+                            };
+                            let _ = state.handle.emit("message-received", msg);
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    {
+        let mut sessions = state.web_sessions.lock().unwrap();
+        sessions.retain(|x| x != &name);
+        let list = sessions.clone();
+        drop(sessions);
+        let _ = state.handle.emit("web-sessions", serde_json::json!({ "list": list }));
+    }
+    let _ = (&mut sink, &mut stream);
+}
+
+async fn upload(
+    AxState(state): AxState<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !*state.web_paired.lock().unwrap() {
+        return Json(serde_json::json!({ "error": "no emparejado" }));
+    }
+    let from = q.get("from").cloned().unwrap_or_else(|| "navegador".into());
+    let raw_name = q.get("name").cloned().unwrap_or_else(|| "archivo".into());
+    let name = std::path::Path::new(&raw_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archivo".into());
+
+    let dir = state.download_dir.lock().unwrap().clone();
+    let _ = std::fs::create_dir_all(&dir);
+    let dest = std::path::Path::new(&dir).join(&name);
+    if let Err(e) = std::fs::write(&dest, &body) {
+        return Json(serde_json::json!({ "error": format!("{e}") }));
+    }
+    let _ = state.handle.asset_protocol_scope().allow_file(&dest);
+    let _ = state.handle.emit(
+        "file-received",
+        serde_json::json!({
+            "from": format!("web:{from}"),
+            "name": name,
+            "path": dest.to_string_lossy(),
+            "size": body.len(),
+            "id": ""
+        }),
+    );
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let fid = format!("u{nanos:x}");
+    state
+        .web_files
+        .lock()
+        .unwrap()
+        .insert(fid.clone(), (name.clone(), body.to_vec()));
+
+    let payload = serde_json::json!({
+        "type": "file",
+        "from": format!("web:{from}"),
+        "name": name,
+        "url": format!("/f/{fid}"),
+        "size": body.len(),
+        "at": nanos as u64 / 1_000_000
+    });
+    let _ = state.web_tx.send(payload.to_string());
+    Json(serde_json::json!({ "ok": true, "url": format!("/f/{fid}") }))
+}
+
+async fn serve_file(
+    AxState(state): AxState<Arc<AppState>>,
+    AxPath(fid): AxPath<String>,
+) -> impl IntoResponse {
+    let file = state.web_files.lock().unwrap().get(&fid).cloned();
+    match file {
+        Some((name, bytes)) => {
+            let headers = [(
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            )];
+            (headers, bytes).into_response()
+        }
+        None => (
+            [(axum::http::header::CONTENT_TYPE, "text/plain".to_string())],
+            "expirado".to_string(),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_devices(
+    AxState(state): AxState<Arc<AppState>>,
+) -> impl IntoResponse {
+    let local_ip = std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| {
+            s.connect("8.8.8.8:80").ok()?;
+            s.local_addr().ok()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".into());
+
+    let hub = serde_json::json!({
+        "name": device_name(),
+        "ip": local_ip,
+        "hub": true
+    });
+    let mut devices = vec![hub];
+    devices.extend(
+        scan_lan_devices()
+            .into_iter()
+            .map(|d| serde_json::json!({ "name": d.name, "ip": d.ip, "service": d.service })),
+    );
+    Json(serde_json::json!({ "devices": devices }))
+}
+
+async fn api_pair_request(
+    AxState(state): AxState<Arc<AppState>>,
+) -> impl IntoResponse {
+    let mut session = state.session_pin.lock().unwrap();
+    let valid = session
+        .as_ref()
+        .map(|(_, t)| t.elapsed() < std::time::Duration::from_secs(120))
+        .unwrap_or(false);
+    if !valid {
+        *session = Some((new_random_pin(), std::time::Instant::now()));
+    }
+    let _ = state.handle.emit(
+        "pair-request",
+        serde_json::json!({ "from": "navegador", "code": session.as_ref().unwrap().0.clone() }),
+    );
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn api_pair(
+    AxState(state): AxState<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let code = body["code"].as_str().unwrap_or("").to_string();
+    let session_ok = state
+        .session_pin
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(c, t)| c == &code && t.elapsed() < std::time::Duration::from_secs(120))
+        .unwrap_or(false);
+    let own_ok = code == state.own_pin.lock().unwrap().as_str();
+    if !session_ok && !own_ok {
+        return Json(serde_json::json!({ "ok": false, "error": "PIN incorrecto" }));
+    }
+    let _ = adopt_pin(&state, &code);
+    *state.web_paired.lock().unwrap() = true;
+    let _ = state
+        .handle
+        .emit("pair-done", serde_json::json!({ "from": "navegador", "code": code }));
+    Json(serde_json::json!({ "ok": true }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {    tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -457,14 +803,43 @@ pub fn run() {    tauri::Builder::default()
 
             let conn = open_history_db(app.handle())?;
             let own_pin = read_or_create_pin(&conn)?;
+            let (web_tx, _) = tokio::sync::broadcast::channel::<String>(64);
 
             let settings = Arc::new(AppState {
                 download_dir: Mutex::new(default_dir.to_string_lossy().to_string()),
                 db: Mutex::new(conn),
                 own_pin: Mutex::new(own_pin),
                 session_pin: Mutex::new(None),
+                handle: app.handle().clone(),
+                web_tx,
+                web_files: Mutex::new(HashMap::new()),
+                web_sessions: Mutex::new(Vec::new()),
+                web_paired: Mutex::new(false),
             });
             app.manage(settings.clone());
+
+            // Puente LAN: navegadores como terminales del escritorio.
+            {
+                let settings = settings.clone();
+                tauri::async_runtime::spawn(async move {
+                    let lan = Router::new()
+                        .route("/", get(lan_index))
+                        .route("/ws", get(ws_upgrade))
+                        .route("/upload", post(upload))
+                        .route("/f/{id}", get(serve_file))
+                        .route("/api/devices", get(api_devices))
+                        .route("/api/pair-request", post(api_pair_request))
+                        .route("/api/pair", post(api_pair))
+                        .layer(DefaultBodyLimit::max(26 * 1024 * 1024))
+                        .with_state(settings);
+                    if let Ok(listener) =
+                        tokio::net::TcpListener::bind("0.0.0.0:8789").await
+                    {
+                        println!("LAN web en http://0.0.0.0:8789");
+                        let _ = axum::serve(listener, lan).await;
+                    }
+                });
+            }
 
             let mdns = ServiceDaemon::new().expect("No se pudo crear el daemon mDNS");
             let name = device_name();
@@ -726,7 +1101,10 @@ pub fn run() {    tauri::Builder::default()
             load_history,
             save_history,
             regenerate_own_pin,
-            pair_verify
+            pair_verify,
+            send_web,
+            send_web_file,
+            get_lan_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
