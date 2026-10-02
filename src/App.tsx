@@ -45,6 +45,8 @@ export default function App() {
   const animateRef = useRef<Map<string, number>>(new Map());
   const scanningRef = useRef(false);
   const selectedKeyRef = useRef<string | null>(null);
+  const windowFocusedRef = useRef(true);
+  const historyRef = useRef<History>({});
 
   useEffect(() => {
     devicesRef.current = devices;
@@ -53,6 +55,10 @@ export default function App() {
   useEffect(() => {
     selectedKeyRef.current = selectedKey;
   }, [selectedKey]);
+
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 700px)");
@@ -106,6 +112,31 @@ export default function App() {
     console.log("notifyRead →", device.ip, ids.length, "ids");
     void sendAck(device.ip, payload);
   }, []);
+
+  // Las palomitas azules solo cuentan si la ventana está en primer plano:
+  // al volver el foco, se marcan como leídos los del chat abierto.
+  useEffect(() => {
+    const update = () => {
+      const focused = document.hasFocus();
+      const wasFocused = windowFocusedRef.current;
+      windowFocusedRef.current = focused;
+      if (focused && !wasFocused) {
+        const key = selectedKeyRef.current;
+        if (key) {
+          const unread = (historyRef.current[key] ?? [])
+            .filter((e) => !e.mine && !e.read)
+            .map((e) => e.id);
+          notifyRead(key, unread);
+        }
+      }
+    };
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    return () => {
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+    };
+  }, [notifyRead]);
 
   useEffect(() => {
     if (DEMO) {
@@ -171,7 +202,8 @@ export default function App() {
       .catch(() => {});
     onMessage((msg) => {
       const id = pushEntry(msg.from, { mine: false, text: msg.text }, msg.id);
-      if (selectedKeyRef.current === msg.from) notifyRead(msg.from, [id]);
+      if (selectedKeyRef.current === msg.from && windowFocusedRef.current)
+        notifyRead(msg.from, [id]);
     }).then((fn) => {
       if (cancelled) fn();
       else offs.push(fn);
@@ -186,7 +218,8 @@ export default function App() {
         },
         f.id,
       );
-      if (selectedKeyRef.current === f.from) notifyRead(f.from, [id]);
+      if (selectedKeyRef.current === f.from && windowFocusedRef.current)
+        notifyRead(f.from, [id]);
     }).then((fn) => {
       if (cancelled) fn();
       else offs.push(fn);
