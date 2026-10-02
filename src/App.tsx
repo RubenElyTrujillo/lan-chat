@@ -62,21 +62,24 @@ export default function App() {
     return () => mq.removeEventListener("change", apply);
   }, []);
 
-  const pushEntry = useCallback((key: string, draft: EntryDraft): string => {
-    const entry: Entry = {
-      id: crypto.randomUUID(),
-      at: Date.now(),
-      state: draft.mine ? "sending" : undefined,
-      ...draft,
-    };
-    setHistory((h) => ({ ...h, [key]: [...(h[key] ?? []), entry] }));
-    setDevices((prev) =>
-      prev.some((d) => d.key === key)
-        ? prev
-        : [...prev, { key, name: displayName(key), online: false }],
-    );
-    return entry.id;
-  }, []);
+  const pushEntry = useCallback(
+    (key: string, draft: EntryDraft, wireId?: string): string => {
+      const entry: Entry = {
+        id: wireId ?? crypto.randomUUID(),
+        at: Date.now(),
+        state: draft.mine ? "sending" : undefined,
+        ...draft,
+      };
+      setHistory((h) => ({ ...h, [key]: [...(h[key] ?? []), entry] }));
+      setDevices((prev) =>
+        prev.some((d) => d.key === key)
+          ? prev
+          : [...prev, { key, name: displayName(key), online: false }],
+      );
+      return entry.id;
+    },
+    [],
+  );
 
   const patchEntry = useCallback((key: string, id: string, state: Entry["state"]) => {
     setHistory((h) => ({
@@ -167,18 +170,22 @@ export default function App() {
       .then(setDownloadFolderState)
       .catch(() => {});
     onMessage((msg) => {
-      const id = pushEntry(msg.from, { mine: false, text: msg.text });
+      const id = pushEntry(msg.from, { mine: false, text: msg.text }, msg.id);
       if (selectedKeyRef.current === msg.from) notifyRead(msg.from, [id]);
     }).then((fn) => {
       if (cancelled) fn();
       else offs.push(fn);
     });
     onFile((f) => {
-      const id = pushEntry(f.from, {
-        mine: false,
-        text: `📎 ${f.name}`,
-        filePath: f.path,
-      });
+      const id = pushEntry(
+        f.from,
+        {
+          mine: false,
+          text: `📎 ${f.name}`,
+          filePath: f.path,
+        },
+        f.id,
+      );
       if (selectedKeyRef.current === f.from) notifyRead(f.from, [id]);
     }).then((fn) => {
       if (cancelled) fn();

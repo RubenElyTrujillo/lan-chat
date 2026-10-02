@@ -10,6 +10,7 @@ export interface RawDevice {
 export interface RawMessage {
   from: string;
   text: string;
+  id?: string;
 }
 
 export function isTauri(): boolean {
@@ -58,6 +59,7 @@ export interface RawFile {
   name: string;
   path: string;
   size: number;
+  id?: string;
 }
 
 export function onMessage(handler: (msg: RawMessage) => void): Promise<() => void> {

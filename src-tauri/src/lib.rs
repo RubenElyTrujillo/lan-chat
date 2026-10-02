@@ -22,6 +22,8 @@ struct DiscoveredDevice {
 struct ChatMessage {
     from: String,
     text: String,
+    #[serde(default)]
+    id: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -30,6 +32,8 @@ struct FileNotice {
     name: String,
     path: String,
     size: u64,
+    #[serde(default)]
+    id: String,
 }
 
 /// Ajustes compartidos de la app (vivos mientras la app viva).
@@ -256,6 +260,7 @@ pub fn run() {
                                     ChatMessage {
                                         from: "?".into(),
                                         text: line.to_string(),
+                                        id: String::new(),
                                     },
                                 );
                                 continue;
@@ -270,11 +275,13 @@ pub fn run() {
                                 let msg = ChatMessage {
                                     from: from.clone(),
                                     text: parsed["text"].as_str().unwrap_or("").to_string(),
+                                    id: id.clone(),
                                 };
                                 println!("{} dice: {}", msg.from, msg.text);
                                 let _ = handle.emit("message-received", msg);
                                 if !id.is_empty() {
-                                    let payload = serde_json::json!({ "kind": "ack", "id": id });
+                                    let payload =
+                                        serde_json::json!({ "kind": "ack", "id": id.clone() });
                                     let _ = reader
                                         .get_ref()
                                         .write_all(format!("{payload}\n").as_bytes());
@@ -337,6 +344,7 @@ pub fn run() {
                                             name,
                                             path: dest.to_string_lossy().to_string(),
                                             size,
+                                            id,
                                         },
                                     );
                                 } else {
