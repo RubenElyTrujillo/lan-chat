@@ -412,8 +412,8 @@ fn adopt_pin(state: &AppState, pin: &str) -> Result<(), String> {
 /// Handshake de emparejamiento: verifica que el PIN del otro dispositivo sea correcto.
 #[tauri::command]
 async fn pair_verify(
-    app: tauri::AppHandle,
-    state: tauri::State<Arc<AppState>>,
+    _app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
     ip: String,
     pin: String,
 ) -> Result<(), String> {
