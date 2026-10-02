@@ -28,8 +28,8 @@ export function sendText(ip: string, texto: string): Promise<void> {
   return invoke("send_text", { ip, texto });
 }
 
-export function sendFile(path: string): Promise<void> {
-  return invoke("send_file", { path });
+export function sendFile(ip: string, path: string): Promise<void> {
+  return invoke("send_file", { ip, path });
 }
 
 export function getDownloadFolder(): Promise<string> {

@@ -198,8 +198,8 @@ export default function App() {
       const device = devicesRef.current.find((d) => d.key === key);
       const deliver = async () => {
         try {
-          if (entry.filePath) await sendFile(entry.filePath);
-          else if (device?.ip) await sendText(device.ip, entry.text);
+          if (entry.filePath && device?.ip) await sendFile(device.ip, entry.filePath);
+          else if (!entry.filePath && device?.ip) await sendText(device.ip, entry.text);
           else if (device) await new Promise((r) => setTimeout(r, 400));
           else throw new Error("desconocido");
           patchEntry(key, id, "sent");
@@ -255,7 +255,7 @@ export default function App() {
         ],
       }));
       try {
-        await sendFile(path);
+        await sendFile(device.ip, path);
         patchEntry(key, id, "sent");
       } catch (e) {
         console.error("send_file falló:", e);
