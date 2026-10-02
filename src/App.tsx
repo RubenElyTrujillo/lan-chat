@@ -25,6 +25,7 @@ interface EntryDraft {
   mine: boolean;
   text: string;
   state?: Entry["state"];
+  filePath?: string;
 }
 
 export default function App() {
@@ -140,7 +141,9 @@ export default function App() {
       if (cancelled) fn();
       else offs.push(fn);
     });
-    onFile((f) => pushEntry(f.from, { mine: false, text: `📎 ${f.name}` })).then((fn) => {
+    onFile((f) =>
+      pushEntry(f.from, { mine: false, text: `📎 ${f.name}`, filePath: f.path }),
+    ).then((fn) => {
       if (cancelled) fn();
       else offs.push(fn);
     });

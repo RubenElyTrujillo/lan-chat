@@ -776,3 +776,13 @@ button {
 .icon-btn.is-spinning svg {
   animation: lanchat-spin 0.8s linear infinite;
 }
+
+.bubble-img {
+  display: block;
+  max-width: min(240px, 100%);
+  max-height: 220px;
+  object-fit: cover;
+  border-radius: 10px;
+  margin-bottom: 6px;
+  cursor: zoom-in;
+}

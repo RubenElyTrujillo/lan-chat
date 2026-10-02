@@ -97,7 +97,7 @@ async fn send_text(ip: String, texto: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn send_file(ip: String, path: String) -> Result<(), String> {
+async fn send_file(app: tauri::AppHandle, ip: String, path: String) -> Result<(), String> {
     use std::io::{Read, Write};
 
     let src = std::path::Path::new(&path);
@@ -138,6 +138,9 @@ async fn send_file(ip: String, path: String) -> Result<(), String> {
             .map_err(|e| format!("Envío fallido: {e}"))?;
         left -= n as u64;
     }
+
+    // Permitir que el webview muestre este archivo como previsualización.
+    let _ = app.asset_protocol_scope().allow_file(src);
     Ok(())
 }
 
@@ -279,6 +282,7 @@ pub fn run() {
 
                                 if ok {
                                     println!("Archivo recibido: {}", dest.display());
+                                    let _ = handle.asset_protocol_scope().allow_file(&dest);
                                     let _ = handle.emit(
                                         "file-received",
                                         FileNotice {

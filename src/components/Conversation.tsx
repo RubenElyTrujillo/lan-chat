@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { Check, ChevronLeft, RotateCcw } from "lucide-react";
-import type { DeviceState, Entry } from "../types";
+import { openPath } from "@tauri-apps/plugin-opener";
+import { isPreviewableImage, type DeviceState, type Entry } from "../types";
 import { Avatar } from "./Avatar";
 import { Menu } from "./Menu";
 
@@ -37,6 +39,8 @@ function Bubble({
     minute: "2-digit",
   });
   const failed = entry.state === "failed";
+  const hasFile = !!entry.filePath;
+  const isImage = hasFile && isPreviewableImage(entry.text);
 
   return (
     <div
@@ -47,10 +51,27 @@ function Bubble({
       <button
         type="button"
         className={`bubble ${failed ? "is-failed" : ""}`}
-        onClick={failed ? onRetry : undefined}
-        title={failed ? "Tocá para reintentar" : undefined}
+        onClick={
+          failed ? onRetry : hasFile ? () => openPath(entry.filePath!) : undefined
+        }
+        title={
+          failed
+            ? "Tocá para reintentar"
+            : hasFile
+              ? "Abrir archivo"
+              : undefined
+        }
       >
-        <span className="bubble-text">{entry.text}</span>
+        {isImage && entry.filePath && (
+          <img
+            src={convertFileSrc(entry.filePath)}
+            className="bubble-img"
+            alt={entry.text.replace("📎 ", "")}
+          />
+        )}
+        <span className="bubble-text">
+          {isImage ? entry.text.replace("📎 ", "") : entry.text}
+        </span>
         <span className="bubble-meta">
           {entry.mine && entry.state === "sent" && <Check size={12} aria-hidden />}
           {time}

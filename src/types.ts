@@ -19,3 +19,7 @@ export type History = Record<string, Entry[]>;
 export function displayName(raw: string): string {
   return raw.replace(/\._lanchat\._tcp\.local\.?$/i, "");
 }
+
+export function isPreviewableImage(raw: string): boolean {
+  return /\.(jpe?g|png|gif|webp|bmp)$/i.test(raw);
+}
