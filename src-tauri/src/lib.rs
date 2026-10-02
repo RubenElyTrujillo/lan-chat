@@ -358,6 +358,10 @@ pub fn run() {
                                     .peer_addr()
                                     .map(|a| a.ip().to_string())
                                     .unwrap_or_default();
+                                println!(
+                                    "read-ack de {peer}: {} ids",
+                                    ids.len()
+                                );
                                 let _ = handle.emit(
                                     "read-ack",
                                     serde_json::json!({ "from": peer, "ids": ids }),

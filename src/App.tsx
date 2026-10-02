@@ -89,7 +89,10 @@ export default function App() {
   const notifyRead = useCallback((key: string, ids: string[]) => {
     if (ids.length === 0) return;
     const device = devicesRef.current.find((d) => d.key === key);
-    if (!device?.ip) return;
+    if (!device?.ip) {
+      console.warn("notifyRead: no encuentro IP para", key);
+      return;
+    }
     const payload = JSON.stringify({ kind: "read-ack", ids });
     setHistory((h) => ({
       ...h,
@@ -97,6 +100,7 @@ export default function App() {
         !e.mine && ids.includes(e.id) ? { ...e, read: true } : e,
       ),
     }));
+    console.log("notifyRead →", device.ip, ids.length, "ids");
     void sendAck(device.ip, payload);
   }, []);
 
@@ -192,8 +196,12 @@ export default function App() {
     let cancelled = false;
     const offs: Array<() => void> = [];
     onReadAck((a) => {
+      console.log("read-ack recibido de", a.from, "con", a.ids.length, "ids");
       const device = devicesRef.current.find((d) => d.ip === a.from);
-      if (!device) return;
+      if (!device) {
+        console.warn("read-ack de IP desconocida:", a.from);
+        return;
+      }
       setHistory((h) => ({
         ...h,
         [device.key]: (h[device.key] ?? []).map((e) =>
