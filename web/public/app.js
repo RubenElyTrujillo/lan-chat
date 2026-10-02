@@ -1,6 +1,12 @@
 // LAN-Chat Web — cliente del hub: presencia por IP pública + relay de datos.
 const $ = (id) => document.getElementById(id);
 
+// randomUUID solo existe en contextos seguros (HTTPS); fallback para HTTP.
+const uid = () =>
+  crypto.randomUUID
+    ? crypto.randomUUID()
+    : Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
+
 const state = {
   ws: null,
   myId: null,
@@ -201,7 +207,7 @@ function sendChat() {
     type: "chat",
     text: v,
     kind: "web",
-    id: crypto.randomUUID(),
+    id: uid(),
   });
   addChat(chatPeer.name, v);
   $("msg").value = "";
@@ -283,7 +289,7 @@ async function uploadFile(file) {
     name: file.name,
     data,
     kind: "web",
-    id: crypto.randomUUID(),
+    id: uid(),
   });
   addFile(chatPeer.name, file.name, buf, chatPeer.id);
 }
