@@ -25,12 +25,54 @@ export function discover(): Promise<RawDevice[]> {
   return invoke<RawDevice[]>("discover_devices");
 }
 
-export function sendText(ip: string, texto: string, id: string): Promise<string> {
-  return invoke<string>("send_text", { ip, texto, id });
+export function sendText(
+  ip: string,
+  pin: string,
+  texto: string,
+  id: string,
+): Promise<string> {
+  return invoke<string>("send_text", { ip, pin, texto, id });
 }
 
-export function sendFile(ip: string, path: string, id: string): Promise<string> {
-  return invoke<string>("send_file", { ip, path, id });
+export function sendFile(
+  ip: string,
+  pin: string,
+  path: string,
+  id: string,
+): Promise<string> {
+  return invoke<string>("send_file", { ip, pin, path, id });
+}
+
+export function getOwnPin(): Promise<string> {
+  return invoke("get_own_pin");
+}
+
+// PINs de dispositivos emparejados (config local, no historial).
+const PINS_KEY = "lanchat.pins.v1";
+
+export function getPinFor(key: string): string {
+  try {
+    const all = JSON.parse(localStorage.getItem(PINS_KEY) ?? "{}") as Record<
+      string,
+      string
+    >;
+    return all[key] ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setPinFor(key: string, pin: string): void {
+  try {
+    const all = JSON.parse(localStorage.getItem(PINS_KEY) ?? "{}") as Record<
+      string,
+      string
+    >;
+    all[key] = pin;
+    localStorage.setItem(PINS_KEY, JSON.stringify(all));
+  } catch {
+    /* almacenamiento no disponible */
+  }
 }
 
 export function sendAck(ip: string, payload: string): Promise<void> {

@@ -43,6 +43,7 @@ struct FileNotice {
 struct AppState {
     download_dir: Mutex<String>,
     db: Mutex<Connection>,
+    own_pin: Mutex<String>,
 }
 
 /// Espejo Rust de una entrada del historial (mismos campos que Entry en TS).
@@ -107,11 +108,21 @@ async fn discover_devices() -> Vec<DiscoveredDevice> {
 }
 
 #[tauri::command]
-async fn send_text(ip: String, texto: String, id: String) -> Result<String, String> {
+async fn send_text(
+    ip: String,
+    pin: String,
+    texto: String,
+    id: String,
+) -> Result<String, String> {
     use std::io::Write;
 
-    let payload =
-        serde_json::json!({ "kind": "text", "id": id, "from": device_name(), "text": texto });
+    let payload = serde_json::json!({
+        "kind": "text",
+        "id": id,
+        "from": device_name(),
+        "pin": pin,
+        "text": texto
+    });
 
     let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
         .map_err(|e| format!("No se pudo conectar: {e}"))?;
@@ -119,19 +130,21 @@ async fn send_text(ip: String, texto: String, id: String) -> Result<String, Stri
         .write_all(format!("{payload}\n").as_bytes())
         .map_err(|e| format!("No se pudo enviar: {e}"))?;
 
-    Ok(wait_delivery_ack(&mut stream))
+    Ok(wait_delivery_ack(&mut stream)?)
 }
 
-/// Espera (con timeout) el ack que el receptor escribe en el mismo socket.
-/// Devuelve "delivered" si llegó el acuse, o "sent" si no respondió a tiempo.
-fn wait_delivery_ack(stream: &mut std::net::TcpStream) -> String {
+/// Espera (con timeout) el acuse del receptor en el mismo socket.
+/// "delivered" si llegó el ack; "sent" si no respondió;
+/// Err("PIN_REQUERIDO") si el receptor rechazó por PIN.
+fn wait_delivery_ack(stream: &mut std::net::TcpStream) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     match reader.read_line(&mut line) {
-        Ok(_) if line.contains("\"ack\"") => "delivered".into(),
-        _ => "sent".into(),
+        Ok(_) if line.contains("\"rejected\"") => Err("PIN_REQUERIDO".into()),
+        Ok(_) if line.contains("\"ack\"") => Ok("delivered".into()),
+        _ => Ok("sent".into()),
     }
 }
 
@@ -139,6 +152,7 @@ fn wait_delivery_ack(stream: &mut std::net::TcpStream) -> String {
 async fn send_file(
     app: tauri::AppHandle,
     ip: String,
+    pin: String,
     path: String,
     id: String,
 ) -> Result<String, String> {
@@ -157,6 +171,7 @@ async fn send_file(
         "kind": "file",
         "id": id,
         "from": device_name(),
+        "pin": pin,
         "name": name,
         "size": size
     });
@@ -186,7 +201,7 @@ async fn send_file(
 
     // Permitir que el webview muestre este archivo como previsualización.
     let _ = app.asset_protocol_scope().allow_file(src);
-    Ok(wait_delivery_ack(&mut stream))
+    Ok(wait_delivery_ack(&mut stream)?)
 }
 
 /// Acuse de recibo: el receptor responde por el mismo socket.
@@ -315,7 +330,52 @@ fn open_history_db(app: &tauri::AppHandle) -> Result<Connection, String> {
         [],
     )
     .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+/// Lee el PIN propio de la app; si no existe, genera uno de 6 dígitos y lo persiste.
+fn read_or_create_pin(conn: &Connection) -> Result<String, String> {
+    let existing: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'pin'", [], |r| {
+            r.get(0)
+        })
+        .map(Some)
+        .or_else(|e| {
+            if e == rusqlite::Error::QueryReturnedNoRows {
+                Ok(None)
+            } else {
+                Err(e.to_string())
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    if let Some(pin) = existing {
+        return Ok(pin);
+    }
+    // MVP: pseudo-aleatorio a partir del reloj del sistema.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(482913);
+    let pin = format!("{:06}", nanos % 1_000_000);
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
+        rusqlite::params![pin],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(pin)
+}
+
+#[tauri::command]
+fn get_own_pin(state: tauri::State<Arc<AppState>>) -> String {
+    state.own_pin.lock().unwrap().clone()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -331,9 +391,13 @@ pub fn run() {    tauri::Builder::default()
                 .unwrap_or_else(|_| std::env::temp_dir().join("lan-chat"));
             let _ = std::fs::create_dir_all(&default_dir);
 
+            let conn = open_history_db(app.handle())?;
+            let own_pin = read_or_create_pin(&conn)?;
+
             let settings = Arc::new(AppState {
                 download_dir: Mutex::new(default_dir.to_string_lossy().to_string()),
-                db: Mutex::new(open_history_db(app.handle())?),
+                db: Mutex::new(conn),
+                own_pin: Mutex::new(own_pin),
             });
             app.manage(settings.clone());
 
@@ -394,6 +458,18 @@ pub fn run() {    tauri::Builder::default()
 
                         let from = parsed["from"].as_str().unwrap_or("?").to_string();
                         let id = parsed["id"].as_str().unwrap_or("").to_string();
+
+                        // Candado: texto y archivos exigen el PIN propio del receptor.
+                        let kind = parsed["kind"].as_str().unwrap_or("text").to_string();
+                        let sent_pin = parsed["pin"].as_str().unwrap_or("");
+                        let own_pin = settings.own_pin.lock().unwrap().clone();
+                        if (kind == "text" || kind == "file") && sent_pin != own_pin {
+                            println!("⚠️ Conexión rechazada por PIN (de {from})");
+                            let _ = reader
+                                .get_ref()
+                                .write_all(b"{\"kind\":\"rejected\",\"reason\":\"pin\"}\n");
+                            continue;
+                        }
 
                         match parsed["kind"].as_str().unwrap_or("text") {
                             "text" => {
@@ -520,7 +596,8 @@ pub fn run() {    tauri::Builder::default()
             get_download_folder,
             set_download_folder,
             load_history,
-            save_history
+            save_history,
+            get_own_pin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

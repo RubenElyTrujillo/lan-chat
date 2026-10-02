@@ -8,6 +8,8 @@ import {
   demoRequested,
   discover,
   getDownloadFolder,
+  getOwnPin,
+  getPinFor,
   isTauri,
   onFile,
   onMessage,
@@ -17,6 +19,7 @@ import {
   sendFile,
   sendText,
   setDownloadFolder as persistDownloadFolder,
+  setPinFor,
   type RawDevice,
 } from "./lib/backend";
 import { DEMO_DEVICES, demoHistory, runDemoSim } from "./lib/demo";
@@ -40,6 +43,9 @@ export default function App() {
   const [narrow, setNarrow] = useState(false);
   const [downloadFolder, setDownloadFolderState] = useState("");
   const [dragging, setDragging] = useState(false);
+  const [ownPin, setOwnPin] = useState("");
+  const [pendingPin, setPendingPin] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState("");
 
   const devicesRef = useRef<DeviceState[]>([]);
   const loadedRef = useRef(false);
@@ -238,6 +244,9 @@ export default function App() {
     let cancelled = false;
     const offs: Array<() => void> = [];
     runScan();
+    getOwnPin()
+      .then(setOwnPin)
+      .catch(() => {});
     getDownloadFolder()
       .then(setDownloadFolderState)
       .catch(() => {});
@@ -359,14 +368,15 @@ export default function App() {
       }));
       try {
         if (device?.ip) {
-          const estado = await sendText(device.ip, text, id);
+          const estado = await sendText(device.ip, getPinFor(key), text, id);
           patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
         } else if (device) {
           await new Promise((r) => setTimeout(r, 400));
           patchEntry(key, id, "sent");
         } else throw new Error("desconocido");
       } catch (e) {
-        console.error("send falló:", e);
+        if (String(e).includes("PIN_REQUERIDO")) setPendingPin(key);
+        else console.error("send falló:", e);
         patchEntry(key, id, "failed");
       }
     },
@@ -382,17 +392,18 @@ export default function App() {
       const deliver = async () => {
         try {
           if (entry.filePath && device?.ip) {
-            const estado = await sendFile(device.ip, entry.filePath, id);
+            const estado = await sendFile(device.ip, getPinFor(key), entry.filePath, id);
             patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
           } else if (!entry.filePath && device?.ip) {
-            const estado = await sendText(device.ip, entry.text, id);
+            const estado = await sendText(device.ip, getPinFor(key), entry.text, id);
             patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
           } else if (device) {
             await new Promise((r) => setTimeout(r, 400));
             patchEntry(key, id, "sent");
           } else throw new Error("desconocido");
         } catch (e) {
-          console.error("reintento falló:", e);
+          if (String(e).includes("PIN_REQUERIDO")) setPendingPin(key);
+          else console.error("reintento falló:", e);
           patchEntry(key, id, "failed");
         }
       };
@@ -447,10 +458,11 @@ export default function App() {
         ],
       }));
       try {
-        const estado = await sendFile(device.ip, path, id);
+        const estado = await sendFile(device.ip, getPinFor(key), path, id);
         patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
       } catch (e) {
-        console.error("send_file falló:", e);
+        if (String(e).includes("PIN_REQUERIDO")) setPendingPin(key);
+        else console.error("send_file falló:", e);
         patchEntry(key, id, "failed");
       }
     },
@@ -467,6 +479,20 @@ export default function App() {
     },
     [sendFileTo],
   );
+
+  // Emparejar: guardar el PIN del otro dispositivo y reenviar sus pendientes.
+  const submitPin = useCallback(() => {
+    const key = pendingPin;
+    const pin = pinInput.trim();
+    if (!key || pin.length < 4) return;
+    setPinFor(key, pin);
+    setPendingPin(null);
+    setPinInput("");
+    const failed = (historyRef.current[key] ?? []).filter(
+      (e) => e.state === "failed",
+    );
+    for (const e of failed) retryRef.current(key, e.id);
+  }, [pendingPin, pinInput]);
 
   // Arrastrar archivos desde el sistema y soltarlos en la app.
   useEffect(() => {
@@ -524,6 +550,7 @@ export default function App() {
           onRescan={runScan}
           onPickFolder={pickDownloadFolder}
           downloadFolder={downloadFolder}
+          ownPin={ownPin}
           onDeleteAll={deleteAll}
         />
         {selected ? (
@@ -550,6 +577,43 @@ export default function App() {
           </section>
         )}
       </div>
+
+      {pendingPin && (
+        <div className="pin-overlay" role="dialog" aria-label="Emparejar dispositivo">
+          <div className="pin-card">
+            <h3>Dispositivo protegido con PIN</h3>
+            <p>Pedile el PIN que aparece en la otra app y escribilo para emparejar.</p>
+            <input
+              value={pinInput}
+              onChange={(e) =>
+                setPinInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+              }
+              placeholder="PIN de 6 dígitos"
+              inputMode="numeric"
+            />
+            <div className="pin-actions">
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => {
+                  setPendingPin(null);
+                  setPinInput("");
+                }}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="pill"
+                disabled={pinInput.length < 4}
+                onClick={submitPin}
+              >
+                Emparejar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

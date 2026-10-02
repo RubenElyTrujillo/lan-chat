@@ -1,6 +1,5 @@
 import { useRef } from "react";
-import { FolderOpen, Search } from "lucide-react";
-import type { DeviceState, Entry, History } from "../types";
+import { FolderOpen, Search } from "lucide-react";import type { DeviceState, Entry, History } from "../types";
 import { Avatar } from "./Avatar";
 import { Menu } from "./Menu";
 
@@ -65,6 +64,7 @@ export function DeviceList({
   onRescan,
   onPickFolder,
   downloadFolder,
+  ownPin,
   onDeleteAll,
 }: {
   devices: DeviceState[];
@@ -75,6 +75,7 @@ export function DeviceList({
   onRescan: () => void;
   onPickFolder: () => void;
   downloadFolder: string;
+  ownPin: string;
   onDeleteAll: () => void;
 }) {
   const knownRef = useRef<Set<string> | null>(null);
@@ -108,6 +109,14 @@ export function DeviceList({
           {devices.length > 0 && (
             <span className="list-count">
               {onlineCount} en línea · {devices.length}
+            </span>
+          )}
+          {ownPin && (
+            <span
+              className="list-pin"
+              title="Tu PIN: los otros dispositivos lo necesitan para enviarte"
+            >
+              PIN {ownPin}
             </span>
           )}
         </div>
