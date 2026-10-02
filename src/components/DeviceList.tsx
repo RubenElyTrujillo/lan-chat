@@ -64,7 +64,6 @@ export function DeviceList({
   onRescan,
   onPickFolder,
   downloadFolder,
-  ownPin,
   onRegeneratePin,
   onDeleteAll,
 }: {
@@ -76,7 +75,6 @@ export function DeviceList({
   onRescan: () => void;
   onPickFolder: () => void;
   downloadFolder: string;
-  ownPin: string;
   onRegeneratePin: () => void;
   onDeleteAll: () => void;
 }) {
@@ -111,14 +109,6 @@ export function DeviceList({
           {devices.length > 0 && (
             <span className="list-count">
               {onlineCount} en línea · {devices.length}
-            </span>
-          )}
-          {ownPin && (
-            <span
-              className="list-pin"
-              title="Tu PIN: los otros dispositivos lo necesitan para enviarte"
-            >
-              PIN {ownPin}
             </span>
           )}
         </div>

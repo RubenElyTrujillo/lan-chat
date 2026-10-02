@@ -8,10 +8,12 @@ import {
   demoRequested,
   discover,
   getDownloadFolder,
-  getOwnPin,
   getPinFor,
   isTauri,
+  onPairDone,
+  onPairRequest,
   pairVerify,
+  sendPairRequest,
   onFile,
   onMessage,
   onReadAck,
@@ -45,7 +47,9 @@ export default function App() {
   const [narrow, setNarrow] = useState(false);
   const [downloadFolder, setDownloadFolderState] = useState("");
   const [dragging, setDragging] = useState(false);
-  const [ownPin, setOwnPin] = useState("");
+  const [pairRequest, setPairRequest] = useState<{ from: string; code: string } | null>(
+    null,
+  );
   const [pendingPin, setPendingPin] = useState<string | null>(null);
   const [pairingKey, setPairingKey] = useState<string | null>(null);
   const [pinError, setPinError] = useState("");
@@ -248,9 +252,6 @@ export default function App() {
     let cancelled = false;
     const offs: Array<() => void> = [];
     runScan();
-    getOwnPin()
-      .then(setOwnPin)
-      .catch(() => {});
     getDownloadFolder()
       .then(setDownloadFolderState)
       .catch(() => {});
@@ -307,6 +308,29 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // Solicitud de vinculación entrante: mostrar el código de sesión.
+  useEffect(() => {
+    if (DEMO) return;
+    let cancelled = false;
+    const offs: Array<() => void> = [];
+    onPairRequest((r) => {
+      if (!cancelled) setPairRequest(r);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else offs.push(fn);
+    });
+    onPairDone(() => {
+      if (!cancelled) setPairRequest(null);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else offs.push(fn);
+    });
+    return () => {
+      cancelled = true;
+      offs.forEach((fn) => fn());
+    };
+  }, []);
+
   // Palomitas azules: el otro lado vio los mensajes.
   useEffect(() => {
     if (DEMO) return;
@@ -359,10 +383,12 @@ export default function App() {
     [notifyRead],
   );
 
-  // Dispositivo sin vincular → flujo de emparejamiento en vez del chat.
+  // Dispositivo sin vincular → pedir código al otro y abrir el flujo de vinculación.
   const openConversation = useCallback(
     (key: string) => {
       if (!DEMO && !getPinFor(key)) {
+        const device = devicesRef.current.find((d) => d.key === key);
+        if (device?.ip) void sendPairRequest(device.ip);
         setPairingKey(key);
         setPinError("");
         setPinInput("");
@@ -537,8 +563,7 @@ export default function App() {
 
   const regeneratePin = useCallback(async () => {
     try {
-      const nuevo = await regenerateOwnPin();
-      setOwnPin(nuevo);
+      await regenerateOwnPin();
     } catch (e) {
       console.error("No se pudo regenerar el PIN:", e);
     }
@@ -600,7 +625,6 @@ export default function App() {
           onRescan={runScan}
           onPickFolder={pickDownloadFolder}
           downloadFolder={downloadFolder}
-          ownPin={ownPin}
           onRegeneratePin={regeneratePin}
           onDeleteAll={deleteAll}
         />
@@ -640,7 +664,7 @@ export default function App() {
             <p>
               {pinError ||
                 (pairingKey
-                  ? "Pedile el PIN que aparece en la otra app y escribilo acá."
+                  ? `En ${displayName(pairingKey)} va a aparecer un código de vinculación. Escribilo acá:`
                   : "Pedile el PIN que aparece en la otra app y escribilo para emparejar.")}
             </p>
             <input
@@ -673,6 +697,20 @@ export default function App() {
                 Emparejar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {pairRequest && (
+        <div className="pin-overlay" role="dialog" aria-label="Solicitud de vinculación">
+          <div className="pin-card">
+            <h3>Solicitud de vinculación</h3>
+            <p>
+              <strong>{pairRequest.from}</strong> quiere vincularse con esta app. En la otra
+              máquina escribí este código:
+            </p>
+            <div className="pair-code">{pairRequest.code}</div>
+            <p className="pin-hint">El código vence en 2 minutos.</p>
           </div>
         </div>
       )}

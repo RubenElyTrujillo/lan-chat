@@ -44,6 +44,7 @@ struct AppState {
     download_dir: Mutex<String>,
     db: Mutex<Connection>,
     own_pin: Mutex<String>,
+    session_pin: Mutex<Option<(String, std::time::Instant)>>,
 }
 
 /// Espejo Rust de una entrada del historial (mismos campos que Entry en TS).
@@ -389,6 +390,7 @@ fn regenerate_own_pin(state: tauri::State<Arc<AppState>>) -> Result<String, Stri
         .map_err(|e| e.to_string())?;
     }
     *state.own_pin.lock().unwrap() = pin.clone();
+    *state.session_pin.lock().unwrap() = None;
     Ok(pin)
 }
 
@@ -416,11 +418,6 @@ async fn pair_verify(ip: String, pin: String) -> Result<(), String> {
         }
     }
 }
-#[tauri::command]
-fn get_own_pin(state: tauri::State<Arc<AppState>>) -> String {
-    state.own_pin.lock().unwrap().clone()
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {    tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -441,6 +438,7 @@ pub fn run() {    tauri::Builder::default()
                 download_dir: Mutex::new(default_dir.to_string_lossy().to_string()),
                 db: Mutex::new(conn),
                 own_pin: Mutex::new(own_pin),
+                session_pin: Mutex::new(None),
             });
             app.manage(settings.clone());
 
@@ -502,13 +500,11 @@ pub fn run() {    tauri::Builder::default()
                         let from = parsed["from"].as_str().unwrap_or("?").to_string();
                         let id = parsed["id"].as_str().unwrap_or("").to_string();
 
-                        // Candado: texto y archivos exigen el PIN propio del receptor.
+                        // Candado: texto y archivos exigen un pin válido del receptor.
                         let kind = parsed["kind"].as_str().unwrap_or("text").to_string();
                         let sent_pin = parsed["pin"].as_str().unwrap_or("");
                         let own_pin = settings.own_pin.lock().unwrap().clone();
-                        if (kind == "text" || kind == "file" || kind == "pair-verify")
-                            && sent_pin != own_pin
-                        {
+                        if (kind == "text" || kind == "file") && sent_pin != own_pin {
                             println!("⚠️ Conexión rechazada por PIN (de {from})");
                             let _ = reader
                                 .get_ref()
@@ -622,11 +618,64 @@ pub fn run() {    tauri::Builder::default()
                                 );
                             }
                             "pair-verify" => {
+                                let session_ok = settings
+                                    .session_pin
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(|(code, t)| {
+                                        code == &sent_pin
+                                            && t.elapsed() < std::time::Duration::from_secs(120)
+                                    })
+                                    .unwrap_or(false);
+                                let own_ok = sent_pin == own_pin;
+
+                                if !session_ok && !own_ok {
+                                    let _ = reader.get_ref().write_all(
+                                        b"{\"kind\":\"rejected\",\"reason\":\"pin\"}\n",
+                                    );
+                                    println!("⚠️ PIN incorrecto en pair-verify (de {from})");
+                                    continue;
+                                }
+
+                                // El código de sesión se vuelve el pin de la pareja.
+                                if session_ok {
+                                    let _ = settings.db.lock().unwrap().execute(
+                                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
+                                        rusqlite::params![sent_pin],
+                                    );
+                                    *settings.own_pin.lock().unwrap() = sent_pin.to_string();
+                                    *settings.session_pin.lock().unwrap() = None;
+                                }
+
                                 let payload = serde_json::json!({ "kind": "ack", "id": id });
                                 let _ = reader
                                     .get_ref()
                                     .write_all(format!("{payload}\n").as_bytes());
+                                let _ = handle.emit("pair-done", serde_json::json!({ "from": from }));
                                 println!("🔗 Emparejamiento verificado desde {from}");
+                            }
+
+                            // Solicitud de vinculación: mostrar código de sesión (2 min).
+                            "pair-request" => {
+                                let mut session = settings.session_pin.lock().unwrap();
+                                let valid = session
+                                    .as_ref()
+                                    .map(|(_, t)| {
+                                        t.elapsed() < std::time::Duration::from_secs(120)
+                                    })
+                                    .unwrap_or(false);
+                                if !valid {
+                                    *session =
+                                        Some((new_random_pin(), std::time::Instant::now()));
+                                }
+                                let code = session.as_ref().unwrap().0.clone();
+                                drop(session);
+                                println!("🔗 Solicitud de emparejamiento de {from}");
+                                let _ = handle.emit(
+                                    "pair-request",
+                                    serde_json::json!({ "from": from, "code": code }),
+                                );
                             }
                             _ => {}
                         }
@@ -649,7 +698,6 @@ pub fn run() {    tauri::Builder::default()
             set_download_folder,
             load_history,
             save_history,
-            get_own_pin,
             regenerate_own_pin,
             pair_verify
         ])

@@ -43,10 +43,6 @@ export function sendFile(
   return invoke<string>("send_file", { ip, pin, path, id });
 }
 
-export function getOwnPin(): Promise<string> {
-  return invoke("get_own_pin");
-}
-
 export function regenerateOwnPin(): Promise<string> {
   return invoke("regenerate_own_pin");
 }
@@ -85,6 +81,25 @@ export function setPinFor(key: string, pin: string): void {
 
 export function sendAck(ip: string, payload: string): Promise<void> {
   return invoke("send_ack", { ip, payload });
+}
+
+export function sendPairRequest(ip: string): Promise<void> {
+  return invoke("send_ack", { ip, payload: JSON.stringify({ kind: "pair-request" }) });
+}
+
+export interface RawPairRequest {
+  from: string;
+  code: string;
+}
+
+export function onPairRequest(
+  handler: (r: RawPairRequest) => void,
+): Promise<() => void> {
+  return listen<RawPairRequest>("pair-request", (event) => handler(event.payload));
+}
+
+export function onPairDone(handler: (r: { from: string }) => void): Promise<() => void> {
+  return listen<{ from: string }>("pair-done", (event) => handler(event.payload));
 }
 
 export function probePort(ip: string, port = 8787): Promise<boolean> {
