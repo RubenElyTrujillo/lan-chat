@@ -84,13 +84,13 @@ function handle(m) {
         break;
       }
       case "chat":
-        if (!state.pairedApps.has(m.from_id) && p.kind !== "app") return;
-        addChat(m.from_name, p.text, p.id);
+        if (p.kind === "app" && !state.pairedApps.has(m.from_id)) return;
+        addChat(m.from_name, p.text);
         break;
       case "file": {
-        if (!state.pairedApps.has(m.from_id) && p.kind !== "app") return;
+        if (p.kind === "app" && !state.pairedApps.has(m.from_id)) return;
         const bytes = Uint8Array.from(atob(p.data), (c) => c.charCodeAt(0));
-        addFile(m.from_name, p.name, bytes, p.id);
+        addFile(m.from_name, p.name, bytes);
         break;
       }
     }
@@ -108,7 +108,7 @@ function renderPeers() {
     const paired = state.pairedApps.has(p.id);
     const el = document.createElement("button");
     el.className = "device";
-    el.innerHTML = `<span class="dot ${paired ? "" : "dim"}"></span>
+    el.innerHTML = `<span class="dot ${paired || !isApp ? "" : "dim"}"></span>
       <span>${isApp ? "🖥️" : "🌐"} ${esc(p.name)}</span>
       ${isApp ? '<span class="tag">app</span>' : '<span class="tag web">web</span>'}
       <span class="arrow">${paired || !isApp ? "Abrir chat →" : "Vincular →"}</span>`;
