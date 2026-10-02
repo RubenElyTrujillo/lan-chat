@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317181a'/%3E%3Cpath d='M9 11.5c0-1.4 1.1-2.5 2.5-2.5h9A2.5 2.5 0 0 1 23 11.5v6a2.5 2.5 0 0 1-2.5 2.5H14l-3.6 3v-3H11.5A2.5 2.5 0 0 1 9 17.5z' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <title>LAN-Chat Web</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <span class="app-mark">💬</span>
+        <span class="app-name">LAN-Chat <em>web</em></span>
+        <span class="topbar-spacer"></span>
+        <span class="net-chip">salas efímeras · sin cuentas</span>
+      </header>
+
+      <!-- Landing -->
+      <section id="landing" class="landing">
+        <div class="hero">
+          <h1>Compartí texto y archivos<br />por código de sala</h1>
+          <p>
+            Creá una sala, pasale el código a quien quieras y listo. Nada se
+            guarda: cuando todos salen, la sala desaparece.
+          </p>
+        </div>
+
+        <div class="cards">
+          <div class="card">
+            <h2>Crear sala</h2>
+            <input id="name-create" placeholder="Tu nombre" maxlength="24" />
+            <button id="btn-create" class="pill">Crear sala</button>
+          </div>
+          <div class="card">
+            <h2>Unirse</h2>
+            <input id="name-join" placeholder="Tu nombre" maxlength="24" />
+            <input
+              id="code-join"
+              placeholder="CÓDIGO"
+              maxlength="6"
+              class="code-input"
+            />
+            <button id="btn-join" class="pill">Unirme</button>
+          </div>
+        </div>
+        <p id="landing-error" class="error"></p>
+      </section>
+
+      <!-- Chat -->
+      <section id="chat" class="shell hidden">
+        <aside class="list-col">
+          <div class="list-head">
+            <div>
+              <h2>Sala</h2>
+              <button id="room-code" class="room-code" title="Copiar código"></button>
+            </div>
+            <button id="btn-leave" class="pill pill-ghost">Salir</button>
+          </div>
+          <div class="members">
+            <h3>En la sala</h3>
+            <ul id="members"></ul>
+          </div>
+          <div class="list-tip">
+            Arrastrá archivos a la ventana o tocá 📎 para compartirlos.
+            Los archivos expiran en 30 minutos.
+          </div>
+        </aside>
+
+        <section class="conv-col">
+          <div id="thread" class="thread" role="log" aria-live="polite"></div>
+          <footer class="composer">
+            <button id="btn-attach" class="icon-btn" title="Adjuntar archivo">📎</button>
+            <div class="composer-field">
+              <input
+                id="msg-input"
+                placeholder="Escribe un mensaje"
+                maxlength="2000"
+                autocomplete="off"
+              />
+            </div>
+            <button id="btn-send" class="pill">Enviar</button>
+          </footer>
+        </section>
+      </section>
+    </main>
+    <input id="file-input" type="file" hidden />
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
