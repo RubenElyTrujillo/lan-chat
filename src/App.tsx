@@ -47,6 +47,8 @@ export default function App() {
   const selectedKeyRef = useRef<string | null>(null);
   const windowFocusedRef = useRef(true);
   const historyRef = useRef<History>({});
+  const onlineRef = useRef<Map<string, boolean>>(new Map());
+  const retryRef = useRef<(key: string, id: string) => void>(() => {});
 
   useEffect(() => {
     devicesRef.current = devices;
@@ -180,6 +182,27 @@ export default function App() {
   }, [history]);
 
   const applyScan = useCallback((found: RawDevice[]) => {
+    const onlineKeys = new Set(found.map((f) => displayName(f.name)));
+    const firstScan = onlineRef.current.size === 0;
+    const revived: string[] = [];
+    for (const key of onlineKeys) {
+      if (onlineRef.current.get(key) === false) revived.push(key);
+    }
+    for (const key of onlineKeys) onlineRef.current.set(key, true);
+    for (const [key, was] of onlineRef.current) {
+      if (!onlineKeys.has(key) && was) onlineRef.current.set(key, false);
+    }
+
+    // Outbox: los mensajes fallidos se reenvían solos cuando el
+    // dispositivo vuelve a aparecer en la red.
+    const targets = firstScan ? [...onlineKeys] : revived;
+    for (const key of targets) {
+      const failed = (historyRef.current[key] ?? []).filter(
+        (e) => e.state === "failed",
+      );
+      for (const e of failed) retryRef.current(key, e.id);
+    }
+
     setDevices((prev) => {
       const map = new Map(prev.map((d) => [d.key, { ...d }]));
       const seen = new Set<string>();
@@ -353,6 +376,10 @@ export default function App() {
     },
     [history, patchEntry],
   );
+
+  useEffect(() => {
+    retryRef.current = retry;
+  }, [retry]);
 
   const deleteConversation = useCallback((key: string) => {
     setHistory((h) => {

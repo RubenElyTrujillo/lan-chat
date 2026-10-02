@@ -86,7 +86,7 @@ function Bubble({
       {failed && (
         <span className="bubble-fail">
           <RotateCcw size={11} aria-hidden />
-          No se pudo enviar · Tocá para reintentar
+          Se reenviará cuando vuelva a conectar · Tocá para forzar
         </span>
       )}
     </div>
