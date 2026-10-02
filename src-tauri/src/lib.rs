@@ -586,7 +586,14 @@ async fn ws_loop(socket: WebSocket, state: Arc<AppState>) {
     {
         return;
     }
-    let _ = state.web_tx.subscribe(); // canal de difusión escritorio → navegadores
+
+    // Presentar: la lista de sesiones va a todos los navegadores.
+    {
+        let list = state.web_sessions.lock().unwrap().clone();
+        let _ = state.web_tx.send(
+            serde_json::json!({ "type": "sessions", "list": list }).to_string(),
+        );
+    }
 
     let mut rx = state.web_tx.subscribe();
     loop {
@@ -624,7 +631,16 @@ async fn ws_loop(socket: WebSocket, state: Arc<AppState>) {
                                 text: v["text"].as_str().unwrap_or("").to_string(),
                                 id: format!("web-{nanos:x}"),
                             };
+                            // La app guarda el historial.
                             let _ = state.handle.emit("message-received", msg);
+                            // Y el destino (o todos) lo recibe en su navegador.
+                            let payload = serde_json::json!({
+                                "type": "chat",
+                                "from": name,
+                                "to": v["to"],
+                                "text": v["text"].as_str().unwrap_or("")
+                            });
+                            let _ = state.web_tx.send(payload.to_string());
                         }
                     }
                     _ => break,
@@ -639,6 +655,9 @@ async fn ws_loop(socket: WebSocket, state: Arc<AppState>) {
         let list = sessions.clone();
         drop(sessions);
         let _ = state.handle.emit("web-sessions", serde_json::json!({ "list": list }));
+        let _ = state.web_tx.send(
+            serde_json::json!({ "type": "sessions", "list": list }).to_string(),
+        );
     }
     let _ = (&mut sink, &mut stream);
 }
