@@ -359,12 +359,7 @@ fn read_or_create_pin(conn: &Connection) -> Result<String, String> {
     if let Some(pin) = existing {
         return Ok(pin);
     }
-    // MVP: pseudo-aleatorio a partir del reloj del sistema.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
-        .unwrap_or(482913);
-    let pin = format!("{:06}", nanos % 1_000_000);
+    let pin = new_random_pin();
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
         rusqlite::params![pin],
@@ -373,6 +368,54 @@ fn read_or_create_pin(conn: &Connection) -> Result<String, String> {
     Ok(pin)
 }
 
+fn new_random_pin() -> String {
+    // MVP: pseudo-aleatorio a partir del reloj del sistema.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(482913);
+    format!("{:06}", nanos % 1_000_000)
+}
+
+#[tauri::command]
+fn regenerate_own_pin(state: tauri::State<Arc<AppState>>) -> Result<String, String> {
+    let pin = new_random_pin();
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
+            rusqlite::params![pin],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    *state.own_pin.lock().unwrap() = pin.clone();
+    Ok(pin)
+}
+
+/// Handshake de emparejamiento: verifica que el PIN del otro dispositivo sea correcto.
+#[tauri::command]
+async fn pair_verify(ip: String, pin: String) -> Result<(), String> {
+    use std::io::Write;
+
+    let payload = serde_json::json!({ "kind": "pair-verify", "from": device_name(), "pin": pin });
+    let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
+        .map_err(|e| format!("No se pudo conectar: {e}"))?;
+    stream
+        .write_all(format!("{payload}\n").as_bytes())
+        .map_err(|e| format!("No se pudo enviar: {e}"))?;
+
+    match wait_delivery_ack(&mut stream) {
+        Ok(s) if s == "delivered" => Ok(()),
+        Ok(_) => Err("No se pudo verificar el emparejamiento".into()),
+        Err(e) => {
+            if e.contains("PIN_REQUERIDO") {
+                Err("PIN incorrecto".into())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
 #[tauri::command]
 fn get_own_pin(state: tauri::State<Arc<AppState>>) -> String {
     state.own_pin.lock().unwrap().clone()
@@ -463,7 +506,9 @@ pub fn run() {    tauri::Builder::default()
                         let kind = parsed["kind"].as_str().unwrap_or("text").to_string();
                         let sent_pin = parsed["pin"].as_str().unwrap_or("");
                         let own_pin = settings.own_pin.lock().unwrap().clone();
-                        if (kind == "text" || kind == "file") && sent_pin != own_pin {
+                        if (kind == "text" || kind == "file" || kind == "pair-verify")
+                            && sent_pin != own_pin
+                        {
                             println!("⚠️ Conexión rechazada por PIN (de {from})");
                             let _ = reader
                                 .get_ref()
@@ -576,6 +621,13 @@ pub fn run() {    tauri::Builder::default()
                                     serde_json::json!({ "from": peer, "ids": ids }),
                                 );
                             }
+                            "pair-verify" => {
+                                let payload = serde_json::json!({ "kind": "ack", "id": id });
+                                let _ = reader
+                                    .get_ref()
+                                    .write_all(format!("{payload}\n").as_bytes());
+                                println!("🔗 Emparejamiento verificado desde {from}");
+                            }
                             _ => {}
                         }
                     }
@@ -597,7 +649,9 @@ pub fn run() {    tauri::Builder::default()
             set_download_folder,
             load_history,
             save_history,
-            get_own_pin
+            get_own_pin,
+            regenerate_own_pin,
+            pair_verify
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

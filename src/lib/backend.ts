@@ -47,6 +47,14 @@ export function getOwnPin(): Promise<string> {
   return invoke("get_own_pin");
 }
 
+export function regenerateOwnPin(): Promise<string> {
+  return invoke("regenerate_own_pin");
+}
+
+export function pairVerify(ip: string, pin: string): Promise<void> {
+  return invoke("pair_verify", { ip, pin });
+}
+
 // PINs de dispositivos emparejados (config local, no historial).
 const PINS_KEY = "lanchat.pins.v1";
 

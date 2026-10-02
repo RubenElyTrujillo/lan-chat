@@ -65,6 +65,7 @@ export function DeviceList({
   onPickFolder,
   downloadFolder,
   ownPin,
+  onRegeneratePin,
   onDeleteAll,
 }: {
   devices: DeviceState[];
@@ -76,6 +77,7 @@ export function DeviceList({
   onPickFolder: () => void;
   downloadFolder: string;
   ownPin: string;
+  onRegeneratePin: () => void;
   onDeleteAll: () => void;
 }) {
   const knownRef = useRef<Set<string> | null>(null);
@@ -141,7 +143,14 @@ export function DeviceList({
         </button>
         <Menu
           label="Más opciones"
-          items={[{ label: "Borrar todo el historial", danger: true, action: onDeleteAll }]}
+          items={[
+            { label: "Regenerar mi PIN", action: onRegeneratePin },
+            {
+              label: "Borrar todo el historial",
+              danger: true,
+              action: onDeleteAll,
+            },
+          ]}
         />
       </header>
 

@@ -856,6 +856,10 @@ button {
   letter-spacing: 2px;
 }
 
+.pin-error {
+  color: #ff6b6b;
+}
+
 .pin-actions {
   display: flex;
   gap: 8px;

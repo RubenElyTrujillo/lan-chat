@@ -11,10 +11,12 @@ import {
   getOwnPin,
   getPinFor,
   isTauri,
+  pairVerify,
   onFile,
   onMessage,
   onReadAck,
   probePort,
+  regenerateOwnPin,
   sendAck,
   sendFile,
   sendText,
@@ -45,6 +47,8 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [ownPin, setOwnPin] = useState("");
   const [pendingPin, setPendingPin] = useState<string | null>(null);
+  const [pairingKey, setPairingKey] = useState<string | null>(null);
+  const [pinError, setPinError] = useState("");
   const [pinInput, setPinInput] = useState("");
 
   const devicesRef = useRef<DeviceState[]>([]);
@@ -343,16 +347,30 @@ export default function App() {
 
   const selected = sorted.find((d) => d.key === selectedKey) ?? null;
 
-  const openConversation = useCallback(
+  const openChat = useCallback(
     (key: string) => {
       animateRef.current.set(key, Date.now());
       setSelectedKey(key);
-      const unread = (history[key] ?? [])
+      const unread = (historyRef.current[key] ?? [])
         .filter((e) => !e.mine && !e.read)
         .map((e) => e.id);
       notifyRead(key, unread);
     },
-    [history, notifyRead],
+    [notifyRead],
+  );
+
+  // Dispositivo sin vincular → flujo de emparejamiento en vez del chat.
+  const openConversation = useCallback(
+    (key: string) => {
+      if (!DEMO && !getPinFor(key)) {
+        setPairingKey(key);
+        setPinError("");
+        setPinInput("");
+        return;
+      }
+      openChat(key);
+    },
+    [openChat],
   );
 
   const send = useCallback(
@@ -480,19 +498,51 @@ export default function App() {
     [sendFileTo],
   );
 
-  // Emparejar: guardar el PIN del otro dispositivo y reenviar sus pendientes.
-  const submitPin = useCallback(() => {
-    const key = pendingPin;
+  // Emparejar: guardar el PIN del otro dispositivo, verificarlo y reenviar pendientes.
+  const submitPin = useCallback(async () => {
+    const key = pendingPin ?? pairingKey;
     const pin = pinInput.trim();
     if (!key || pin.length < 4) return;
     setPinFor(key, pin);
-    setPendingPin(null);
     setPinInput("");
+
+    if (pairingKey) {
+      const device = devicesRef.current.find((d) => d.key === key);
+      if (!device?.ip) {
+        setPinError("No encontré su dirección. Tocá la lupa e intentá de nuevo.");
+        return;
+      }
+      try {
+        await pairVerify(device.ip, pin);
+        setPairingKey(null);
+        setPinError("");
+        openChat(key);
+      } catch (e) {
+        const msg = String(e);
+        setPinError(
+          msg.includes("PIN incorrecto")
+            ? "PIN incorrecto, probá de nuevo."
+            : msg,
+        );
+      }
+      return;
+    }
+
+    setPendingPin(null);
     const failed = (historyRef.current[key] ?? []).filter(
       (e) => e.state === "failed",
     );
     for (const e of failed) retryRef.current(key, e.id);
-  }, [pendingPin, pinInput]);
+  }, [pendingPin, pairingKey, pinInput, openChat]);
+
+  const regeneratePin = useCallback(async () => {
+    try {
+      const nuevo = await regenerateOwnPin();
+      setOwnPin(nuevo);
+    } catch (e) {
+      console.error("No se pudo regenerar el PIN:", e);
+    }
+  }, []);
 
   // Arrastrar archivos desde el sistema y soltarlos en la app.
   useEffect(() => {
@@ -551,6 +601,7 @@ export default function App() {
           onPickFolder={pickDownloadFolder}
           downloadFolder={downloadFolder}
           ownPin={ownPin}
+          onRegeneratePin={regeneratePin}
           onDeleteAll={deleteAll}
         />
         {selected ? (
@@ -578,11 +629,20 @@ export default function App() {
         )}
       </div>
 
-      {pendingPin && (
+      {(pendingPin || pairingKey) && (
         <div className="pin-overlay" role="dialog" aria-label="Emparejar dispositivo">
           <div className="pin-card">
-            <h3>Dispositivo protegido con PIN</h3>
-            <p>Pedile el PIN que aparece en la otra app y escribilo para emparejar.</p>
+            <h3>
+              {pairingKey
+                ? `Vincular con ${displayName(pairingKey)}`
+                : "Dispositivo protegido con PIN"}
+            </h3>
+            <p>
+              {pinError ||
+                (pairingKey
+                  ? "Pedile el PIN que aparece en la otra app y escribilo acá."
+                  : "Pedile el PIN que aparece en la otra app y escribilo para emparejar.")}
+            </p>
             <input
               value={pinInput}
               onChange={(e) =>
@@ -597,6 +657,8 @@ export default function App() {
                 className="icon-btn"
                 onClick={() => {
                   setPendingPin(null);
+                  setPairingKey(null);
+                  setPinError("");
                   setPinInput("");
                 }}
               >
