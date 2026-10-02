@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Wifi } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { DeviceList } from "./components/DeviceList";
 import { Conversation } from "./components/Conversation";
 import {
   demoRequested,
   discover,
+  getDownloadFolder,
   isTauri,
+  onFile,
   onMessage,
+  sendFile,
   sendText,
+  setDownloadFolder as persistDownloadFolder,
   type RawDevice,
 } from "./lib/backend";
 import { DEMO_DEVICES, demoHistory, runDemoSim } from "./lib/demo";
@@ -28,6 +33,7 @@ export default function App() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [scanning, setScanning] = useState(true);
   const [narrow, setNarrow] = useState(false);
+  const [downloadFolder, setDownloadFolderState] = useState("");
 
   const devicesRef = useRef<DeviceState[]>([]);
   const loadedRef = useRef(false);
@@ -125,19 +131,22 @@ export default function App() {
   useEffect(() => {
     if (DEMO) return;
     let cancelled = false;
-    let registered = false;
-    let off: (() => void) | undefined;
+    const offs: Array<() => void> = [];
     runScan();
+    getDownloadFolder()
+      .then(setDownloadFolderState)
+      .catch(() => {});
     onMessage((msg) => pushEntry(msg.from, { mine: false, text: msg.text })).then((fn) => {
       if (cancelled) fn();
-      else {
-        off = fn;
-        registered = true;
-      }
+      else offs.push(fn);
+    });
+    onFile((f) => pushEntry(f.from, { mine: false, text: `📎 ${f.name}` })).then((fn) => {
+      if (cancelled) fn();
+      else offs.push(fn);
     });
     return () => {
       cancelled = true;
-      if (registered) off?.();
+      offs.forEach((fn) => fn());
     };
   }, [pushEntry, runScan]);
 
@@ -212,6 +221,51 @@ export default function App() {
 
   const deleteAll = useCallback(() => setHistory({}), []);
 
+  const pickDownloadFolder = useCallback(async () => {
+    const picked = await openDialog({
+      directory: true,
+      title: "Carpeta para archivos recibidos",
+    });
+    if (typeof picked === "string") {
+      await persistDownloadFolder(picked);
+      setDownloadFolderState(picked);
+    }
+  }, []);
+
+  const sendFileTo = useCallback(
+    async (key: string, path: string) => {
+      const device = devicesRef.current.find((d) => d.key === key);
+      if (!device?.ip) return;
+      const name = path.split(/[\\/]/).pop() ?? path;
+      const id = crypto.randomUUID();
+      setHistory((h) => ({
+        ...h,
+        [key]: [
+          ...(h[key] ?? []),
+          { id, mine: true, text: `📎 ${name}`, at: Date.now(), state: "sending" },
+        ],
+      }));
+      try {
+        await sendFile(path);
+        patchEntry(key, id, "sent");
+      } catch {
+        patchEntry(key, id, "failed");
+      }
+    },
+    [patchEntry],
+  );
+
+  const attachAndSend = useCallback(
+    async (key: string) => {
+      const picked = await openDialog({
+        multiple: false,
+        title: "Elegí un archivo para enviar",
+      });
+      if (typeof picked === "string") await sendFileTo(key, picked);
+    },
+    [sendFileTo],
+  );
+
   return (
     <div className="app">
       <header className="topbar">
@@ -238,6 +292,8 @@ export default function App() {
           selectedKey={selectedKey}
           onSelect={openConversation}
           onRescan={runScan}
+          onPickFolder={pickDownloadFolder}
+          downloadFolder={downloadFolder}
           onDeleteAll={deleteAll}
         />
         {selected ? (
@@ -248,6 +304,7 @@ export default function App() {
             animateAfter={animateRef.current.get(selected.key) ?? 0}
             onBack={() => setSelectedKey(null)}
             onSend={(text) => send(selected.key, text)}
+            onAttach={() => attachAndSend(selected.key)}
             onRetry={(id) => retry(selected.key, id)}
             onDelete={() => deleteConversation(selected.key)}
           />

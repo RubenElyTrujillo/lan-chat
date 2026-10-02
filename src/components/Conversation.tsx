@@ -72,6 +72,7 @@ export function Conversation({
   animateAfter,
   onBack,
   onSend,
+  onAttach,
   onRetry,
   onDelete,
 }: {
@@ -80,6 +81,7 @@ export function Conversation({
   animateAfter: number;
   onBack: () => void;
   onSend: (text: string) => void;
+  onAttach: () => void;
   onRetry: (id: string) => void;
   onDelete: () => void;
 }) {
@@ -151,12 +153,18 @@ export function Conversation({
         )}
       </div>
 
-      <Composer onSend={onSend} />
+      <Composer onSend={onSend} onAttach={onAttach} />
     </section>
   );
 }
 
-function Composer({ onSend }: { onSend: (text: string) => void }) {
+function Composer({
+  onSend,
+  onAttach,
+}: {
+  onSend: (text: string) => void;
+  onAttach: () => void;
+}) {
   const [text, setText] = useState("");
   const areaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -177,7 +185,13 @@ function Composer({ onSend }: { onSend: (text: string) => void }) {
 
   return (
     <footer className="composer">
-      <button type="button" className="icon-btn" aria-label="Adjuntar archivo (pronto)" disabled title="Adjuntar archivos: pronto">
+      <button
+        type="button"
+        className="icon-btn"
+        aria-label="Adjuntar archivo"
+        title="Adjuntar archivo"
+        onClick={onAttach}
+      >
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
           <path d="M9 3.5v11M3.5 9h11" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
         </svg>

@@ -28,6 +28,29 @@ export function sendText(ip: string, texto: string): Promise<void> {
   return invoke("send_text", { ip, texto });
 }
 
+export function sendFile(path: string): Promise<void> {
+  return invoke("send_file", { path });
+}
+
+export function getDownloadFolder(): Promise<string> {
+  return invoke("get_download_folder");
+}
+
+export function setDownloadFolder(path: string): Promise<void> {
+  return invoke("set_download_folder", { path });
+}
+
+export interface RawFile {
+  from: string;
+  name: string;
+  path: string;
+  size: number;
+}
+
 export function onMessage(handler: (msg: RawMessage) => void): Promise<() => void> {
   return listen<RawMessage>("message-received", (event) => handler(event.payload));
+}
+
+export function onFile(handler: (file: RawFile) => void): Promise<() => void> {
+  return listen<RawFile>("file-received", (event) => handler(event.payload));
 }

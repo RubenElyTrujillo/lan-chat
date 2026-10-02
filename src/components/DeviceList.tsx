@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Search } from "lucide-react";
+import { FolderOpen, Search } from "lucide-react";
 import type { DeviceState, Entry, History } from "../types";
 import { Avatar } from "./Avatar";
 import { Menu } from "./Menu";
@@ -63,6 +63,8 @@ export function DeviceList({
   selectedKey,
   onSelect,
   onRescan,
+  onPickFolder,
+  downloadFolder,
   onDeleteAll,
 }: {
   devices: DeviceState[];
@@ -71,6 +73,8 @@ export function DeviceList({
   selectedKey: string | null;
   onSelect: (key: string) => void;
   onRescan: () => void;
+  onPickFolder: () => void;
+  downloadFolder: string;
   onDeleteAll: () => void;
 }) {
   const knownRef = useRef<Set<string> | null>(null);
@@ -109,7 +113,16 @@ export function DeviceList({
         </div>
         <button
           type="button"
-          className={`icon-btn ${scanning ? "is-spinning" : ""}`}
+          className="icon-btn"
+          aria-label="Carpeta de descargas"
+          title={downloadFolder ? `Guardando en: ${downloadFolder}` : "Carpeta de descargas"}
+          onClick={onPickFolder}
+        >
+          <FolderOpen size={18} />
+        </button>
+        <button
+          type="button"
+          className={`icon-btn`}
           aria-label="Buscar dispositivos"
           title="Buscar dispositivos"
           onClick={onRescan}
