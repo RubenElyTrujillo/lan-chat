@@ -11,6 +11,7 @@ export interface Entry {
   text: string;
   at: number;
   state?: "sending" | "sent" | "failed";
+  filePath?: string;
 }
 
 export type History = Record<string, Entry[]>;

@@ -198,11 +198,13 @@ export default function App() {
       const device = devicesRef.current.find((d) => d.key === key);
       const deliver = async () => {
         try {
-          if (device?.ip) await sendText(device.ip, entry.text);
+          if (entry.filePath) await sendFile(entry.filePath);
+          else if (device?.ip) await sendText(device.ip, entry.text);
           else if (device) await new Promise((r) => setTimeout(r, 400));
           else throw new Error("desconocido");
           patchEntry(key, id, "sent");
-        } catch {
+        } catch (e) {
+          console.error("reintento falló:", e);
           patchEntry(key, id, "failed");
         }
       };
@@ -242,13 +244,21 @@ export default function App() {
         ...h,
         [key]: [
           ...(h[key] ?? []),
-          { id, mine: true, text: `📎 ${name}`, at: Date.now(), state: "sending" },
+          {
+            id,
+            mine: true,
+            text: `📎 ${name}`,
+            at: Date.now(),
+            state: "sending",
+            filePath: path,
+          },
         ],
       }));
       try {
         await sendFile(path);
         patchEntry(key, id, "sent");
-      } catch {
+      } catch (e) {
+        console.error("send_file falló:", e);
         patchEntry(key, id, "failed");
       }
     },
