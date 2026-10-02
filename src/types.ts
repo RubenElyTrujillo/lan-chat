@@ -10,8 +10,9 @@ export interface Entry {
   mine: boolean;
   text: string;
   at: number;
-  state?: "sending" | "sent" | "failed";
+  state?: "sending" | "sent" | "delivered" | "read" | "failed";
   filePath?: string;
+  read?: boolean;
 }
 
 export type History = Record<string, Entry[]>;

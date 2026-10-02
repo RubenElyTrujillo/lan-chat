@@ -24,12 +24,25 @@ export function discover(): Promise<RawDevice[]> {
   return invoke<RawDevice[]>("discover_devices");
 }
 
-export function sendText(ip: string, texto: string): Promise<void> {
-  return invoke("send_text", { ip, texto });
+export function sendText(ip: string, texto: string, id: string): Promise<string> {
+  return invoke<string>("send_text", { ip, texto, id });
 }
 
-export function sendFile(ip: string, path: string): Promise<void> {
-  return invoke("send_file", { ip, path });
+export function sendFile(ip: string, path: string, id: string): Promise<string> {
+  return invoke<string>("send_file", { ip, path, id });
+}
+
+export function sendAck(ip: string, payload: string): Promise<void> {
+  return invoke("send_ack", { ip, payload });
+}
+
+export interface RawReadAck {
+  from: string;
+  ids: string[];
+}
+
+export function onReadAck(handler: (ack: RawReadAck) => void): Promise<() => void> {
+  return listen<RawReadAck>("read-ack", (event) => handler(event.payload));
 }
 
 export function getDownloadFolder(): Promise<string> {

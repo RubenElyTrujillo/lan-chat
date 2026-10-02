@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Wifi } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { DeviceList } from "./components/DeviceList";
 import { Conversation } from "./components/Conversation";
 import {
@@ -10,6 +11,8 @@ import {
   isTauri,
   onFile,
   onMessage,
+  onReadAck,
+  sendAck,
   sendFile,
   sendText,
   setDownloadFolder as persistDownloadFolder,
@@ -35,15 +38,21 @@ export default function App() {
   const [scanning, setScanning] = useState(true);
   const [narrow, setNarrow] = useState(false);
   const [downloadFolder, setDownloadFolderState] = useState("");
+  const [dragging, setDragging] = useState(false);
 
   const devicesRef = useRef<DeviceState[]>([]);
   const loadedRef = useRef(false);
   const animateRef = useRef<Map<string, number>>(new Map());
   const scanningRef = useRef(false);
+  const selectedKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     devicesRef.current = devices;
   }, [devices]);
+
+  useEffect(() => {
+    selectedKeyRef.current = selectedKey;
+  }, [selectedKey]);
 
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 700px)");
@@ -53,7 +62,7 @@ export default function App() {
     return () => mq.removeEventListener("change", apply);
   }, []);
 
-  const pushEntry = useCallback((key: string, draft: EntryDraft) => {
+  const pushEntry = useCallback((key: string, draft: EntryDraft): string => {
     const entry: Entry = {
       id: crypto.randomUUID(),
       at: Date.now(),
@@ -66,6 +75,7 @@ export default function App() {
         ? prev
         : [...prev, { key, name: displayName(key), online: false }],
     );
+    return entry.id;
   }, []);
 
   const patchEntry = useCallback((key: string, id: string, state: Entry["state"]) => {
@@ -73,6 +83,21 @@ export default function App() {
       ...h,
       [key]: (h[key] ?? []).map((e) => (e.id === id ? { ...e, state } : e)),
     }));
+  }, []);
+
+  // Avisa al otro dispositivo que sus mensajes fueron vistos (palomitas azules).
+  const notifyRead = useCallback((key: string, ids: string[]) => {
+    if (ids.length === 0) return;
+    const device = devicesRef.current.find((d) => d.key === key);
+    if (!device?.ip) return;
+    const payload = JSON.stringify({ kind: "read-ack", ids });
+    setHistory((h) => ({
+      ...h,
+      [key]: (h[key] ?? []).map((e) =>
+        !e.mine && ids.includes(e.id) ? { ...e, read: true } : e,
+      ),
+    }));
+    void sendAck(device.ip, payload);
   }, []);
 
   useEffect(() => {
@@ -137,13 +162,21 @@ export default function App() {
     getDownloadFolder()
       .then(setDownloadFolderState)
       .catch(() => {});
-    onMessage((msg) => pushEntry(msg.from, { mine: false, text: msg.text })).then((fn) => {
+    onMessage((msg) => {
+      const id = pushEntry(msg.from, { mine: false, text: msg.text });
+      if (selectedKeyRef.current === msg.from) notifyRead(msg.from, [id]);
+    }).then((fn) => {
       if (cancelled) fn();
       else offs.push(fn);
     });
-    onFile((f) =>
-      pushEntry(f.from, { mine: false, text: `📎 ${f.name}`, filePath: f.path }),
-    ).then((fn) => {
+    onFile((f) => {
+      const id = pushEntry(f.from, {
+        mine: false,
+        text: `📎 ${f.name}`,
+        filePath: f.path,
+      });
+      if (selectedKeyRef.current === f.from) notifyRead(f.from, [id]);
+    }).then((fn) => {
       if (cancelled) fn();
       else offs.push(fn);
     });
@@ -151,7 +184,31 @@ export default function App() {
       cancelled = true;
       offs.forEach((fn) => fn());
     };
-  }, [pushEntry, runScan]);
+  }, [pushEntry, runScan, notifyRead]);
+
+  // Palomitas azules: el otro lado vio los mensajes.
+  useEffect(() => {
+    if (DEMO) return;
+    let cancelled = false;
+    const offs: Array<() => void> = [];
+    onReadAck((a) => {
+      const device = devicesRef.current.find((d) => d.ip === a.from);
+      if (!device) return;
+      setHistory((h) => ({
+        ...h,
+        [device.key]: (h[device.key] ?? []).map((e) =>
+          a.ids.includes(e.id) ? { ...e, state: "read" as const } : e,
+        ),
+      }));
+    }).then((fn) => {
+      if (cancelled) fn();
+      else offs.push(fn);
+    });
+    return () => {
+      cancelled = true;
+      offs.forEach((fn) => fn());
+    };
+  }, []);
 
   const sorted = useMemo(() => {
     const activity = (k: string) => history[k]?.[history[k].length - 1]?.at ?? 0;
@@ -165,10 +222,17 @@ export default function App() {
 
   const selected = sorted.find((d) => d.key === selectedKey) ?? null;
 
-  const openConversation = useCallback((key: string) => {
-    animateRef.current.set(key, Date.now());
-    setSelectedKey(key);
-  }, []);
+  const openConversation = useCallback(
+    (key: string) => {
+      animateRef.current.set(key, Date.now());
+      setSelectedKey(key);
+      const unread = (history[key] ?? [])
+        .filter((e) => !e.mine && !e.read)
+        .map((e) => e.id);
+      notifyRead(key, unread);
+    },
+    [history, notifyRead],
+  );
 
   const send = useCallback(
     async (key: string, text: string) => {
@@ -182,11 +246,15 @@ export default function App() {
         ],
       }));
       try {
-        if (device?.ip) await sendText(device.ip, text);
-        else if (device) await new Promise((r) => setTimeout(r, 400));
-        else throw new Error("desconocido");
-        patchEntry(key, id, "sent");
-      } catch {
+        if (device?.ip) {
+          const estado = await sendText(device.ip, text, id);
+          patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
+        } else if (device) {
+          await new Promise((r) => setTimeout(r, 400));
+          patchEntry(key, id, "sent");
+        } else throw new Error("desconocido");
+      } catch (e) {
+        console.error("send falló:", e);
         patchEntry(key, id, "failed");
       }
     },
@@ -201,11 +269,16 @@ export default function App() {
       const device = devicesRef.current.find((d) => d.key === key);
       const deliver = async () => {
         try {
-          if (entry.filePath && device?.ip) await sendFile(device.ip, entry.filePath);
-          else if (!entry.filePath && device?.ip) await sendText(device.ip, entry.text);
-          else if (device) await new Promise((r) => setTimeout(r, 400));
-          else throw new Error("desconocido");
-          patchEntry(key, id, "sent");
+          if (entry.filePath && device?.ip) {
+            const estado = await sendFile(device.ip, entry.filePath, id);
+            patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
+          } else if (!entry.filePath && device?.ip) {
+            const estado = await sendText(device.ip, entry.text, id);
+            patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
+          } else if (device) {
+            await new Promise((r) => setTimeout(r, 400));
+            patchEntry(key, id, "sent");
+          } else throw new Error("desconocido");
         } catch (e) {
           console.error("reintento falló:", e);
           patchEntry(key, id, "failed");
@@ -258,8 +331,8 @@ export default function App() {
         ],
       }));
       try {
-        await sendFile(device.ip, path);
-        patchEntry(key, id, "sent");
+        const estado = await sendFile(device.ip, path, id);
+        patchEntry(key, id, estado === "delivered" ? "delivered" : "sent");
       } catch (e) {
         console.error("send_file falló:", e);
         patchEntry(key, id, "failed");
@@ -279,8 +352,36 @@ export default function App() {
     [sendFileTo],
   );
 
+  // Arrastrar archivos desde el sistema y soltarlos en la app.
+  useEffect(() => {
+    if (DEMO) return;
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setDragging(true);
+        } else if (event.payload.type === "leave") {
+          setDragging(false);
+        } else if (event.payload.type === "drop") {
+          setDragging(false);
+          const key = selectedKeyRef.current;
+          if (!key) return;
+          for (const p of event.payload.paths) void sendFileTo(key, p);
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else un = fn;
+      });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [sendFileTo]);
+
   return (
-    <div className="app">
+    <div className={`app ${dragging ? "is-dragging" : ""}`}>
       <header className="topbar">
         <span className="app-mark" aria-hidden>
           <MessageSquare size={15} strokeWidth={2.2} />

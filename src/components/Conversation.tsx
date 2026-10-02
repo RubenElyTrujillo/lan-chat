@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Check, ChevronLeft, RotateCcw } from "lucide-react";
+import { Check, CheckCheck, ChevronLeft, RotateCcw } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { isPreviewableImage, type DeviceState, type Entry } from "../types";
 import { Avatar } from "./Avatar";
@@ -74,6 +74,12 @@ function Bubble({
         </span>
         <span className="bubble-meta">
           {entry.mine && entry.state === "sent" && <Check size={12} aria-hidden />}
+          {entry.mine && entry.state === "delivered" && (
+            <CheckCheck size={12} aria-hidden />
+          )}
+          {entry.mine && entry.state === "read" && (
+            <CheckCheck size={12} className="is-read" aria-hidden />
+          )}
           {time}
         </span>
       </button>

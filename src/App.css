@@ -786,3 +786,21 @@ button {
   margin-bottom: 6px;
   cursor: zoom-in;
 }
+
+.bubble-meta .is-read {
+  color: #4fb6ec;
+}
+
+.app.is-dragging::after {
+  content: "Soltá para enviar al chat abierto";
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 22, 26, 0.72);
+  color: #fff;
+  font-size: 17px;
+  font-weight: 600;
+  z-index: 50;
+  pointer-events: none;
+}

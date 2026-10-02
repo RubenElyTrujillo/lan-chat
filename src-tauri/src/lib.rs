@@ -83,21 +83,41 @@ async fn discover_devices() -> Vec<DiscoveredDevice> {
 }
 
 #[tauri::command]
-async fn send_text(ip: String, texto: String) -> Result<(), String> {
+async fn send_text(ip: String, texto: String, id: String) -> Result<String, String> {
     use std::io::Write;
 
-    let payload = serde_json::json!({ "kind": "text", "from": device_name(), "text": texto });
+    let payload =
+        serde_json::json!({ "kind": "text", "id": id, "from": device_name(), "text": texto });
 
     let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
         .map_err(|e| format!("No se pudo conectar: {e}"))?;
     stream
         .write_all(format!("{payload}\n").as_bytes())
         .map_err(|e| format!("No se pudo enviar: {e}"))?;
-    Ok(())
+
+    Ok(wait_delivery_ack(&mut stream))
+}
+
+/// Espera (con timeout) el ack que el receptor escribe en el mismo socket.
+/// Devuelve "delivered" si llegó el acuse, o "sent" si no respondió a tiempo.
+fn wait_delivery_ack(stream: &mut std::net::TcpStream) -> String {
+    use std::io::{BufRead, BufReader};
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(_) if line.contains("\"ack\"") => "delivered".into(),
+        _ => "sent".into(),
+    }
 }
 
 #[tauri::command]
-async fn send_file(app: tauri::AppHandle, ip: String, path: String) -> Result<(), String> {
+async fn send_file(
+    app: tauri::AppHandle,
+    ip: String,
+    path: String,
+    id: String,
+) -> Result<String, String> {
     use std::io::{Read, Write};
 
     let src = std::path::Path::new(&path);
@@ -111,6 +131,7 @@ async fn send_file(app: tauri::AppHandle, ip: String, path: String) -> Result<()
 
     let payload = serde_json::json!({
         "kind": "file",
+        "id": id,
         "from": device_name(),
         "name": name,
         "size": size
@@ -141,6 +162,18 @@ async fn send_file(app: tauri::AppHandle, ip: String, path: String) -> Result<()
 
     // Permitir que el webview muestre este archivo como previsualización.
     let _ = app.asset_protocol_scope().allow_file(src);
+    Ok(wait_delivery_ack(&mut stream))
+}
+
+/// Acuse de recibo: el receptor responde por el mismo socket.
+#[tauri::command]
+async fn send_ack(ip: String, payload: String) -> Result<(), String> {
+    use std::io::Write;
+    let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
+        .map_err(|e| format!("No se pudo conectar: {e}"))?;
+    stream
+        .write_all(format!("{payload}\n").as_bytes())
+        .map_err(|e| format!("No se pudo enviar: {e}"))?;
     Ok(())
 }
 
@@ -230,6 +263,7 @@ pub fn run() {
                         };
 
                         let from = parsed["from"].as_str().unwrap_or("?").to_string();
+                        let id = parsed["id"].as_str().unwrap_or("").to_string();
 
                         match parsed["kind"].as_str().unwrap_or("text") {
                             "text" => {
@@ -239,6 +273,12 @@ pub fn run() {
                                 };
                                 println!("{} dice: {}", msg.from, msg.text);
                                 let _ = handle.emit("message-received", msg);
+                                if !id.is_empty() {
+                                    let payload = serde_json::json!({ "kind": "ack", "id": id });
+                                    let _ = reader
+                                        .get_ref()
+                                        .write_all(format!("{payload}\n").as_bytes());
+                                }
                             }
                             "file" => {
                                 let name =
@@ -283,6 +323,13 @@ pub fn run() {
                                 if ok {
                                     println!("Archivo recibido: {}", dest.display());
                                     let _ = handle.asset_protocol_scope().allow_file(&dest);
+                                    if !id.is_empty() {
+                                        let payload =
+                                            serde_json::json!({ "kind": "ack", "id": id });
+                                        let _ = reader
+                                            .get_ref()
+                                            .write_all(format!("{payload}\n").as_bytes());
+                                    }
                                     let _ = handle.emit(
                                         "file-received",
                                         FileNotice {
@@ -296,6 +343,25 @@ pub fn run() {
                                     eprintln!("Transferencia incompleta: {}", dest.display());
                                     let _ = std::fs::remove_file(&dest);
                                 }
+                            }
+                            "read-ack" => {
+                                let ids: Vec<String> = parsed["ids"]
+                                    .as_array()
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let peer = reader
+                                    .get_ref()
+                                    .peer_addr()
+                                    .map(|a| a.ip().to_string())
+                                    .unwrap_or_default();
+                                let _ = handle.emit(
+                                    "read-ack",
+                                    serde_json::json!({ "from": peer, "ids": ids }),
+                                );
                             }
                             _ => {}
                         }
@@ -312,6 +378,7 @@ pub fn run() {
             discover_devices,
             send_text,
             send_file,
+            send_ack,
             get_download_folder,
             set_download_folder
         ])
