@@ -34,6 +34,7 @@ function Bubble({
   animate: boolean;
   onRetry: () => void;
 }) {
+  const [copied, setCopied] = useState(false);
   const time = new Date(entry.at).toLocaleTimeString("es", {
     hour: "2-digit",
     minute: "2-digit",
@@ -41,6 +42,16 @@ function Bubble({
   const failed = entry.state === "failed";
   const hasFile = !!entry.filePath;
   const isImage = hasFile && isPreviewableImage(entry.text);
+
+  const copyText = async () => {
+    try {
+      await navigator.clipboard.writeText(entry.text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* portapapeles no disponible */
+    }
+  };
 
   return (
     <div
@@ -52,14 +63,18 @@ function Bubble({
         type="button"
         className={`bubble ${failed ? "is-failed" : ""}`}
         onClick={
-          failed ? onRetry : hasFile ? () => openPath(entry.filePath!) : undefined
+          failed
+            ? onRetry
+            : hasFile
+              ? () => openPath(entry.filePath!)
+              : copyText
         }
         title={
           failed
             ? "Tocá para reintentar"
             : hasFile
               ? "Abrir archivo"
-              : undefined
+              : "Tocar para copiar"
         }
       >
         {isImage && entry.filePath && (
@@ -73,6 +88,7 @@ function Bubble({
           {isImage ? entry.text.replace("📎 ", "") : entry.text}
         </span>
         <span className="bubble-meta">
+          {copied && <span className="copied-hint">Copiado</span>}
           {entry.mine && entry.state === "sent" && <Check size={12} aria-hidden />}
           {entry.mine && entry.state === "delivered" && (
             <CheckCheck size={12} aria-hidden />

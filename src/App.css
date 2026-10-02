@@ -877,6 +877,18 @@ button {
   opacity: 0.6;
 }
 
+.pill-ghost {
+  background: transparent;
+  border: 1px solid rgba(128, 128, 128, 0.45);
+  color: inherit;
+}
+
+.copied-hint {
+  color: #4fb6ec;
+  margin-right: 4px;
+  font-size: 10px;
+}
+
 .pin-actions {
   display: flex;
   gap: 8px;

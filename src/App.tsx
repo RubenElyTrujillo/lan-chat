@@ -672,13 +672,17 @@ export default function App() {
               onChange={(e) =>
                 setPinInput(e.target.value.replace(/\D/g, "").slice(0, 6))
               }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && pinInput.length >= 4) void submitPin();
+              }}
               placeholder="PIN de 6 dígitos"
               inputMode="numeric"
+              autoFocus
             />
             <div className="pin-actions">
               <button
                 type="button"
-                className="icon-btn"
+                className="pill pill-ghost"
                 onClick={() => {
                   setPendingPin(null);
                   setPairingKey(null);
