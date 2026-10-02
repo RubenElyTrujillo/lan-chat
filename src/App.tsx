@@ -319,7 +319,9 @@ export default function App() {
       if (cancelled) fn();
       else offs.push(fn);
     });
-    onPairDone(() => {
+    onPairDone((done) => {
+      // El receptor guarda el código como pin del iniciador → simetría.
+      setPinFor(done.from, done.code);
       if (!cancelled) setPairRequest(null);
     }).then((fn) => {
       if (cancelled) fn();

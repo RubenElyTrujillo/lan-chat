@@ -394,9 +394,29 @@ fn regenerate_own_pin(state: tauri::State<Arc<AppState>>) -> Result<String, Stri
     Ok(pin)
 }
 
+/// El código verificado se vuelve el pin propio del dispositivo (persistido).
+fn adopt_pin(state: &AppState, pin: &str) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('pin', ?1)",
+            rusqlite::params![pin],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    *state.own_pin.lock().unwrap() = pin.to_string();
+    *state.session_pin.lock().unwrap() = None;
+    Ok(())
+}
+
 /// Handshake de emparejamiento: verifica que el PIN del otro dispositivo sea correcto.
 #[tauri::command]
-async fn pair_verify(ip: String, pin: String) -> Result<(), String> {
+async fn pair_verify(
+    app: tauri::AppHandle,
+    state: tauri::State<Arc<AppState>>,
+    ip: String,
+    pin: String,
+) -> Result<(), String> {
     use std::io::Write;
 
     let payload = serde_json::json!({ "kind": "pair-verify", "from": device_name(), "pin": pin });
@@ -407,7 +427,11 @@ async fn pair_verify(ip: String, pin: String) -> Result<(), String> {
         .map_err(|e| format!("No se pudo enviar: {e}"))?;
 
     match wait_delivery_ack(&mut stream) {
-        Ok(s) if s == "delivered" => Ok(()),
+        Ok(s) if s == "delivered" => {
+            // Simetría: el iniciador también adopta el código como pin propio.
+            adopt_pin(&state, &pin)?;
+            Ok(())
+        }
         Ok(_) => Err("No se pudo verificar el emparejamiento".into()),
         Err(e) => {
             if e.contains("PIN_REQUERIDO") {
@@ -652,7 +676,10 @@ pub fn run() {    tauri::Builder::default()
                                 let _ = reader
                                     .get_ref()
                                     .write_all(format!("{payload}\n").as_bytes());
-                                let _ = handle.emit("pair-done", serde_json::json!({ "from": from }));
+                                let _ = handle.emit(
+                                    "pair-done",
+                                    serde_json::json!({ "from": from, "code": sent_pin }),
+                                );
                                 println!("🔗 Emparejamiento verificado desde {from}");
                             }
 

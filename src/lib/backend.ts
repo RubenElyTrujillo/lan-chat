@@ -98,8 +98,13 @@ export function onPairRequest(
   return listen<RawPairRequest>("pair-request", (event) => handler(event.payload));
 }
 
-export function onPairDone(handler: (r: { from: string }) => void): Promise<() => void> {
-  return listen<{ from: string }>("pair-done", (event) => handler(event.payload));
+export interface RawPairDone {
+  from: string;
+  code: string;
+}
+
+export function onPairDone(handler: (r: RawPairDone) => void): Promise<() => void> {
+  return listen<RawPairDone>("pair-done", (event) => handler(event.payload));
 }
 
 export function probePort(ip: string, port = 8787): Promise<boolean> {
