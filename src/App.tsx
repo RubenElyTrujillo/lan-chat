@@ -19,7 +19,7 @@ import {
   type RawDevice,
 } from "./lib/backend";
 import { DEMO_DEVICES, demoHistory, runDemoSim } from "./lib/demo";
-import { loadHistory, saveHistory } from "./lib/history";
+import { loadHistory, readLegacyHistory, saveHistory } from "./lib/history";
 import { displayName, type DeviceState, type Entry, type History } from "./types";
 
 const DEMO = typeof window === "undefined" || !isTauri() || demoRequested();
@@ -153,13 +153,30 @@ export default function App() {
         (key, text) => pushEntry(key, { mine: false, text }),
       );
     }
-    setHistory(loadHistory());
-    loadedRef.current = true;
+    (async () => {
+      try {
+        const stored = await loadHistory();
+        if (Object.keys(stored).length > 0) {
+          setHistory(stored);
+        } else {
+          // Migración única: subir el historial viejo de localStorage a SQLite.
+          const legacy = readLegacyHistory();
+          if (Object.keys(legacy).length > 0) {
+            setHistory(legacy);
+            await saveHistory(legacy);
+          }
+        }
+      } catch (e) {
+        console.error("No se pudo cargar el historial:", e);
+      } finally {
+        loadedRef.current = true;
+      }
+    })();
   }, [pushEntry]);
 
   useEffect(() => {
     if (DEMO || !loadedRef.current) return;
-    saveHistory(history);
+    void saveHistory(history);
   }, [history]);
 
   const applyScan = useCallback((found: RawDevice[]) => {

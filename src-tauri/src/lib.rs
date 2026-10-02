@@ -1,6 +1,8 @@
 // LAN-Chat — motor: descubrimiento mDNS, transferencia de texto y archivos por TCP local.
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -39,6 +41,23 @@ struct FileNotice {
 /// Ajustes compartidos de la app (vivos mientras la app viva).
 struct AppState {
     download_dir: Mutex<String>,
+    db: Mutex<Connection>,
+}
+
+/// Espejo Rust de una entrada del historial (mismos campos que Entry en TS).
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct HistoryEntry {
+    id: String,
+    mine: bool,
+    text: String,
+    at: i64,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    file_path: Option<String>,
+    #[serde(default)]
+    read: bool,
 }
 
 #[tauri::command]
@@ -193,9 +212,97 @@ fn set_download_folder(path: String, state: tauri::State<Arc<AppState>>) -> Resu
     Ok(())
 }
 
+#[tauri::command]
+fn load_history(
+    state: tauri::State<Arc<AppState>>,
+) -> Result<HashMap<String, Vec<HistoryEntry>>, String> {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, device_key, mine, text, at, state, file_path, read
+             FROM messages ORDER BY at ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                HistoryEntry {
+                    id: row.get(0)?,
+                    mine: row.get(2)?,
+                    text: row.get(3)?,
+                    at: row.get(4)?,
+                    state: row.get(5)?,
+                    file_path: row.get(6)?,
+                    read: row.get::<_, i64>(7)? != 0,
+                },
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut map: HashMap<String, Vec<HistoryEntry>> = HashMap::new();
+    for row in rows {
+        let (key, entry) = row.map_err(|e| e.to_string())?;
+        map.entry(key).or_default().push(entry);
+    }
+    Ok(map)
+}
+
+#[tauri::command]
+fn save_history(
+    state: tauri::State<Arc<AppState>>,
+    history: HashMap<String, Vec<HistoryEntry>>,
+) -> Result<(), String> {
+    let mut conn = state.db.lock().unwrap();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM messages", [])
+        .map_err(|e| e.to_string())?;
+    for (device_key, entries) in &history {
+        for e in entries {
+            tx.execute(
+                "INSERT OR REPLACE INTO messages
+                 (id, device_key, mine, text, at, state, file_path, read)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![e.id, device_key, e.mine, e.text, e.at, e.state, e.file_path, e.read],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Abre (y crea) la base de datos del historial en la carpeta de datos de la app.
+fn open_history_db(app: &tauri::AppHandle) -> Result<Connection, String> {
+    let db_path = app
+        .path()
+        .app_data_dir()
+        .map(|p| p.join("lanchat.db"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("lanchat.db"));
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            device_key TEXT NOT NULL,
+            mine INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            at INTEGER NOT NULL,
+            state TEXT,
+            file_path TEXT,
+            read INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
+pub fn run() {    tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -209,6 +316,7 @@ pub fn run() {
 
             let settings = Arc::new(AppState {
                 download_dir: Mutex::new(default_dir.to_string_lossy().to_string()),
+                db: Mutex::new(open_history_db(app.handle())?),
             });
             app.manage(settings.clone());
 
@@ -392,7 +500,9 @@ pub fn run() {
             send_file,
             send_ack,
             get_download_folder,
-            set_download_folder
+            set_download_folder,
+            load_history,
+            save_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
