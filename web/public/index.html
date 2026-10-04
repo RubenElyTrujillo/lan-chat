@@ -9,88 +9,131 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317181a'/%3E%3Cpath d='M9 11.5c0-1.4 1.1-2.5 2.5-2.5h9A2.5 2.5 0 0 1 23 11.5v6a2.5 2.5 0 0 1-2.5 2.5H14l-3.6 3v-3H11.5A2.5 2.5 0 0 1 9 17.5z' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <title>LAN-Chat</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/style.css?v=20261002b" />
+    <link rel="stylesheet" href="/style.css?v=20261003b" />
   </head>
   <body>
     <main class="app">
       <header class="topbar">
-        <span class="app-mark">💬</span>
-        <span class="app-name">LAN-Chat <em>web</em></span>
+        <span class="app-mark" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+        </span>
+        <span class="app-name">LAN-Chat</span>
         <span class="topbar-spacer"></span>
-        <span class="net-chip">tu red · sin cuentas · sin historial</span>
+        <span class="net-chip" id="conn-chip">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="10" x2="14" y1="2" y2="2" />
+            <line x1="12" x2="15" y1="14" y2="11" />
+            <circle cx="12" cy="14" r="8" />
+          </svg>
+          Sesión efímera
+        </span>
       </header>
 
-      <!-- Nombre -->
-      <section id="landing" class="landing">
-        <div class="hero">
-          <h1>Pasá texto y archivos<br />con quien esté en tu red</h1>
+      <!-- Entrada: nombre de la sesión -->
+      <section id="landing" class="gate">
+        <div class="gate-inner">
+          <h1>Pasá texto y archivos<br />en vivo desde el navegador</h1>
           <p>
-            Todo viaja entre tus dispositivos. Nada se guarda: cerrás y se
-            borra. Las apps de escritorio conservan su historial, los
-            navegadores no.
+            Elegí un nombre y aparecé ante las demás sesiones conectadas a este
+            hub. Esta pestaña no guarda historial: al recargar o cerrar,
+            arrancás de cero. Si el otro lado usa la app de escritorio, esa app
+            puede conservar su propio historial.
           </p>
-        </div>
-        <div class="card">
-          <input id="name" placeholder="Tu nombre" maxlength="24" />
-          <button id="btn-enter" class="pill">Entrar</button>
-        </div>
-        <p id="landing-error" class="error"></p>
-      </section>
-
-      <!-- Pares -->
-      <section id="peers-screen" class="landing hidden">
-        <div class="hero">
-          <h1>En tu red</h1>
-          <p id="peer-count" class="peer-count"></p>
-        </div>
-        <div class="devices" id="peer-list"></div>
-      </section>
-
-      <!-- Vinculación -->
-      <section id="pairing" class="landing hidden">
-        <div class="card">
-          <h2 style="margin: 0">Vincular con la app</h2>
-          <p class="hint">
-            En la app de escritorio aparece un código de 6 dígitos. Escribilo
-            acá para confirmar que sos vos.
-          </p>
-          <input id="pair-code" class="code-input" placeholder="CÓDIGO" maxlength="6" />
-          <button id="btn-pair" class="pill">Confirmar</button>
-          <button id="btn-pair-cancel" class="pill pill-ghost">Cancelar</button>
-          <p id="pairing-err" class="error"></p>
+          <form id="gate-form" class="gate-card">
+            <label class="gate-label" for="name">Tu nombre</label>
+            <input id="name" placeholder="Tu nombre" maxlength="24" autocomplete="off" />
+            <button id="btn-enter" class="pill" type="submit">Entrar</button>
+            <p id="landing-error" class="error" role="alert"></p>
+          </form>
         </div>
       </section>
 
-      <!-- Chat -->
-      <section id="chat" class="shell hidden">
-        <div class="chat-col">
-          <div class="chat-head">
-            <button id="btn-back" class="icon-btn">←</button>
-            <div>
-              <h3 id="chat-title" style="margin: 0; font-size: 15px"></h3>
-              <span id="chat-sub" style="font-size: 11px; color: var(--text-dim)"></span>
+      <!-- Shell: dispositivos + conversación -->
+      <section id="shell" class="shell hidden">
+        <div class="list-col" aria-label="Dispositivos conectados">
+          <header class="list-head">
+            <div class="list-title">
+              <h2>Dispositivos</h2>
+              <span class="list-count" id="list-count"></span>
             </div>
-            <span class="topbar-spacer"></span>
-            <span class="net-chip">efímero</span>
+          </header>
+          <div class="list-scroll" id="device-list"></div>
+        </div>
+
+        <div class="conv-col">
+          <div class="welcome" id="welcome">
+            <h1>Pasá texto y archivos entre sesiones</h1>
+            <p>
+              Los dispositivos conectados aparecen solos en la lista; elegí uno
+              y escribí. Esta pestaña no guarda historial: al recargar,
+              arrancá de nuevo. Lo que enviás queda también en el dispositivo
+              que lo recibe.
+            </p>
           </div>
-          <div id="thread" class="thread"></div>
-          <footer class="composer">
-            <button id="btn-attach" class="icon-btn" title="Adjuntar archivo">📎</button>
-            <div class="composer-field">
-              <input id="msg" placeholder="Escribe un mensaje" maxlength="2000" autocomplete="off" />
-            </div>
-            <button id="btn-send" class="pill">Enviar</button>
-          </footer>
+
+          <div id="conv" class="conv hidden" aria-label="Conversación">
+            <header class="conv-head">
+              <button type="button" id="btn-back" class="icon-btn is-back" aria-label="Volver a dispositivos">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="m15 18-6-6 6-6" />
+                </svg>
+              </button>
+              <span class="avatar" id="conv-avatar"></span>
+              <div class="conv-title">
+                <h3 id="conv-name"></h3>
+                <span class="conv-status" id="conv-status"></span>
+              </div>
+              <span class="net-chip">efímero</span>
+            </header>
+            <div class="conv-scroll" id="thread" role="log" aria-live="polite"></div>
+            <footer class="composer">
+              <button type="button" id="btn-attach" class="icon-btn" aria-label="Adjuntar archivo" title="Adjuntar archivo (máximo 25 MB)">
+                <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+                  <path d="M9 3.5v11M3.5 9h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                </svg>
+              </button>
+              <div class="composer-field">
+                <textarea id="msg" rows="1" maxlength="500" placeholder="Escribe un mensaje" aria-label="Escribe un mensaje"></textarea>
+                <span class="composer-count" id="msg-count" hidden></span>
+              </div>
+              <button type="button" id="btn-send" class="pill">Enviar</button>
+            </footer>
+          </div>
         </div>
       </section>
+
+      <!-- Vinculación con la app de escritorio -->
+      <div id="pairing" class="pin-overlay hidden" role="dialog" aria-modal="true" aria-label="Vincular con la app">
+        <div class="pin-card">
+          <h3 id="pair-title">Vincular con la app</h3>
+          <p id="pair-hint">En la app de escritorio va a aparecer un código de vinculación. Escribilo acá:</p>
+          <input id="pair-code" placeholder="CÓDIGO" maxlength="6" inputmode="numeric" autocomplete="off" />
+          <p id="pairing-err" class="pin-error" role="alert"></p>
+          <div class="pin-actions">
+            <button type="button" id="btn-pair-cancel" class="pill pill-ghost">Cancelar</button>
+            <button type="button" id="btn-pair" class="pill">Confirmar</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Conexión perdida -->
+      <div id="offline" class="offline-banner hidden" role="status">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="2" x2="22" y1="2" y2="22" />
+          <path d="M8.5 16.5a5 5 0 0 1 7 0" />
+          <path d="M2 8.82a15 15 0 0 1 4.17-2.65" />
+          <path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76" />
+          <path d="M16.85 11.25a10 10 0 0 1 2.22 1.68" />
+          <path d="M5 13a10 10 0 0 1 5.24-2.76" />
+          <line x1="12" x2="15.01" y1="20" y2="20" />
+        </svg>
+        <span>Se perdió la conexión con el hub. Recargá la página para entrar de nuevo; esta sesión no se recupera.</span>
+        <button type="button" id="btn-reload" class="pill pill-small">Recargar</button>
+      </div>
     </main>
     <input id="file-input" type="file" hidden />
-    <script type="module" src="/app.js?v=20261002b"></script>
+    <script type="module" src="/app.js?v=20261003b"></script>
   </body>
 </html>
