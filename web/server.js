@@ -6,9 +6,13 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { parseTrustedProxies, resolveClientIp } from "./trust-proxy.js";
 
 const PORT = process.env.PORT || 8788;
 const MAX_MSG = 40 * 1024 * 1024; // 40 MB (archivos base64 por relay)
+// Allowlist exacta de IPs de proxy (separadas por coma). Vacía/ausente = off:
+// se ignora X-Forwarded-For y se agrupa por la IP del socket.
+const trustedProxies = parseTrustedProxies(process.env.TRUST_PROXY);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUB = path.join(__dirname, "public");
@@ -23,7 +27,11 @@ const peers = new Map(); // ws -> { id, name, kind, ip }
 const groups = new Map(); // ip -> Set<ws>
 
 const publicIp = (req) =>
-  (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  resolveClientIp({
+    socketIp: req.socket.remoteAddress,
+    forwardedFor: req.headers["x-forwarded-for"],
+    trustedProxies,
+  });
 
 const send = (res, status, body, type = "application/json") => {
   res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
