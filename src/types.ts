@@ -3,6 +3,9 @@ export interface DeviceState {
   name: string;
   ip?: string;
   online: boolean;
+  // "hub" = sesión efímera de navegador vista por el hub (solo presencia);
+  // ausente = dispositivo LAN real. La ruta de render depende de esto.
+  kind?: "lan" | "hub";
 }
 
 export interface Entry {

@@ -1,5 +1,8 @@
 import { useRef } from "react";
-import { FolderOpen, Search } from "lucide-react";import type { DeviceState, Entry, History } from "../types";
+import { FolderOpen, Search } from "lucide-react";
+import type { DeviceState, Entry, History } from "../types";
+import { HUB_PAIRED_TAG, isContactKey } from "../lib/hub-chat-core";
+import { HUB_PEER_PREVIEW } from "../lib/hub-presence";
 import { Avatar } from "./Avatar";
 import { Menu } from "./Menu";
 
@@ -17,6 +20,7 @@ function previewTime(at: number): string {
 function Row({
   device,
   entry,
+  paired,
   selected,
   entering,
   delay,
@@ -24,11 +28,16 @@ function Row({
 }: {
   device: DeviceState;
   entry?: Entry;
+  paired: boolean;
   selected: boolean;
   entering: boolean;
   delay: number;
   onSelect: () => void;
 }) {
+  const isHub = device.kind === "hub";
+  const isContact = isContactKey(device.key);
+  const showsConversation = !isHub || isContact;
+  const hubName = isHub ? device.name || "Navegador" : device.name;
   return (
     <button
       type="button"
@@ -39,18 +48,27 @@ function Row({
       aria-current={selected ? "true" : undefined}
       onClick={onSelect}
     >
-      <Avatar name={device.name} online={device.online} />
+      <Avatar name={hubName} online={device.online} />
       <span className="device-text">
-        <span className="device-name">{device.name}</span>
+        <span className="device-name">
+          {hubName}
+          {isHub && !isContact && device.name && <span className="hub-tag">Navegador</span>}
+          {paired && <span className="hub-tag">{HUB_PAIRED_TAG}</span>}
+        </span>
         <span className="device-preview">
-          {device.online || entry
-            ? entry
-              ? `${entry.mine ? "Vos: " : ""}${entry.text}`
-              : "Sin mensajes todavía"
-            : "Desconectado"}
+          {showsConversation
+            ? device.online || entry
+              ? entry
+                ? `${entry.mine ? "Vos: " : ""}${entry.text}`
+                : "Sin mensajes todavía"
+              : "Desconectado"
+            : // Presencia del hub: solo avisar, sin prometer conversación.
+              HUB_PEER_PREVIEW}
         </span>
       </span>
-      {entry && <span className="device-time">{previewTime(entry.at)}</span>}
+      {entry && showsConversation && (
+        <span className="device-time">{previewTime(entry.at)}</span>
+      )}
     </button>
   );
 }
@@ -58,6 +76,7 @@ function Row({
 export function DeviceList({
   devices,
   history,
+  pairedKeys,
   scanning,
   selectedKey,
   onSelect,
@@ -69,6 +88,7 @@ export function DeviceList({
 }: {
   devices: DeviceState[];
   history: History;
+  pairedKeys: Set<string>;
   scanning: boolean;
   selectedKey: string | null;
   onSelect: (key: string) => void;
@@ -170,6 +190,7 @@ export function DeviceList({
               key={d.key}
               device={d}
               entry={entries[entries.length - 1]}
+              paired={pairedKeys.has(d.key)}
               selected={d.key === selectedKey}
               entering={enteringRef.current.has(d.key)}
               delay={delayRef.current.get(d.key) ?? 0}

@@ -1,6 +1,9 @@
 // LAN-Chat Web — cliente del hub (presencia + relay), UI portada de la desktop.
 // Estado efímero en memoria: ver client-state.js. Nada se persiste.
 import {
+  canAcceptIncomingContent,
+  canSendFileTo,
+  canSendTextTo,
   createSession,
   sendFile,
   sendTextMessage,
@@ -9,25 +12,51 @@ import {
 } from "./client-state.js";
 import { createConnection } from "./connection.js";
 import { createPairingAttempts } from "./pairing-attempts.js";
+import { createSessionId } from "./session-id.js";
 
 const $ = (id) => document.getElementById(id);
 
 const session = createSession();
+// Sid efímero: una sola vez por carga de página, solo en memoria. No afirma
+// capacidades: las funciones web están pendientes (caps vacío).
+const mySid = createSessionId();
 let myName = null;
 let connecting = false;
-const pairedApps = new Set(); // ids de apps emparejadas (solo esta sesión)
-let pairingTargetId = null;
+const pairedApps = new Set(); // apps emparejadas SOLO en esta conexión
 
 const proto = location.protocol === "https:" ? "wss" : "ws";
 const MAX_FILE = 25 * 1024 * 1024;
 const GROUP_WINDOW = 5 * 60_000;
+
+// ── Protocolo nativo de vinculación ──────────────────────
+// Sin reqId no hay respuesta válida: no se aceptan ni auto-autorizaciones
+// ni respuestas sin correlación. Cada intento sale con un reqId nuevo.
+const VERIFY_TIMEOUT_MS = 6000;
+const REQUEST_TTL_MS = 120_000;
+const MAX_CODE_STRIKES = 3;
+const CODE_PATTERN = /^\d{8}$/;
+
+let requestTimer = null;
+let verifyTimer = null;
+
+function clearPairingTimers() {
+  clearTimeout(requestTimer);
+  clearTimeout(verifyTimer);
+  requestTimer = verifyTimer = null;
+}
+
+function newReqId() {
+  return crypto.randomUUID();
+}
 
 // Un solo socket activo: los callbacks van atados a su propio socket y los
 // eventos de un socket reemplazado se ignoran (ver connection.js).
 const conn = createConnection({
   url: `${proto}://${location.host}/hub`,
   onOpen: (socket) =>
-    socket.send(JSON.stringify({ type: "hello", name: myName, kind: "web" })),
+    socket.send(
+      JSON.stringify({ type: "hello", name: myName, kind: "web", sid: mySid, caps: [] }),
+    ),
   onMessage: (socket, ev) => {
     let m;
     try {
@@ -44,15 +73,14 @@ const conn = createConnection({
   onClose: () => onConnectionLost(),
 });
 
-// Intentos de vinculación salientes: cancelar, timeout o un intento más nuevo
-// dejan sin efecto a cualquier pair-ok tardío (ver pairing-attempts.js).
+// Intentos de vinculación salientes: cancelar, expirar (TTL de la solicitud)
+// o un intento más nuevo dejan sin efecto a cualquier pair-ok tardío. El
+// reloj es el del navegador; la máquina de estados es determinista (ver
+// pairing-attempts.js).
 const pairingAttempts = createPairingAttempts({
-  timeoutMs: 6000,
-  onTimeout: (appId) => {
-    if (appId === pairingTargetId) {
-      $("pairing-err").textContent = "No respondió. ¿Es el código correcto?";
-    }
-  },
+  verifyTimeoutMs: VERIFY_TIMEOUT_MS,
+  requestTtlMs: REQUEST_TTL_MS,
+  maxWrongCodes: MAX_CODE_STRIKES,
 });
 
 // ── Helpers de la desktop ────────────────────────────────
@@ -162,9 +190,12 @@ function onConnectionLost() {
 
 function markDisconnected() {
   session.setSocketOpen(false);
-  pairingAttempts.cancel();
-  pairingTargetId = null;
-  $("pairing").classList.add("hidden");
+  // La vinculación no sobrevive a la conexión: la app debe reemparejarse
+  // sobre la conexión nueva. Nada persiste.
+  pairedApps.clear();
+  pairingAttempts.cancel(); // socket cerrado: no hay pair-cancel que enviar
+  clearPairingTimers();
+  closePairingOverlay();
   $("offline").classList.remove("hidden");
   $("conn-chip").lastChild.textContent = "Sin conexión";
   renderDevices();
@@ -189,7 +220,18 @@ function handle(m) {
   }
   if (m.type === "peers") {
     const others = (m.list || []).filter((p) => p.id !== session.myId);
-    session.applyPeers(others);
+    const { left } = session.applyPeers(others);
+    // Quien se va deja de estar emparejado y arrastra su intento pendiente.
+    for (const p of left) {
+      pairedApps.delete(p.id);
+      const pending = pairingAttempts.pending();
+      if (pending && pending.appId === p.id) {
+        pairingAttempts.cancel();
+        clearPairingTimers();
+        closePairingOverlay();
+        $("pairing-err").textContent = "";
+      }
+    }
     renderDevices();
     renderView();
     return;
@@ -204,27 +246,61 @@ function handleRelay(m) {
   if (!p || typeof p.type !== "string") return;
   switch (p.type) {
     case "pair-request": {
-      // Una app quiere vincularse: grupo confiable, respondemos OK por esta sesión.
-      pairedApps.add(m.from_id);
-      relayTo(m.from_id, { type: "pair-ok" });
-      session.system(m.from_id, `Vinculada la app de escritorio de ${m.from_name}.`);
-      renderDevices();
-      if (session.selected() === m.from_id) renderView();
+      // La vinculación se inicia SOLO desde esta lista. Un pedido entrante
+      // de la app no autoriza nada: queda como información, sin pair-ok.
+      if (!pairedApps.has(m.from_id)) {
+        session.system(
+          m.from_id,
+          `${m.from_name || "La app"} quiere vincularse. Por ahora, la vinculación se inicia desde esta lista.`,
+        );
+        renderDevices();
+        if (session.selected() === m.from_id) renderView();
+      }
       break;
     }
     case "pair-ok": {
-      // Solo completa el intento vigente: respuestas tardías o de otra app
-      // se ignoran y no navegan la UI.
-      if (pairingAttempts.accept(m.from_id)) {
+      // Solo completa el intento vigente: mismo par Y mismo reqId. Respuestas
+      // tardías, de otro par o sin reqId se ignoran y no navegan la UI.
+      if (pairingAttempts.accept(m.from_id, p.reqId)) {
+        clearPairingTimers();
         pairedApps.add(m.from_id);
-        pairingTargetId = null;
-        $("pairing").classList.add("hidden");
+        const conv = session.conversation(m.from_id);
+        session.system(
+          m.from_id,
+          `Vinculada la app de ${conv.name || m.from_name}. El envío desde el navegador estará disponible más adelante.`,
+        );
+        closePairingOverlay();
+        renderDevices();
         openConversation(m.from_id);
       }
       break;
     }
+    case "pair-error": {
+      // Requiere la misma correlación que un pair-ok; lo malformado se ignora.
+      if (typeof p.reqId !== "string" || p.reqId.length === 0) break;
+      const res = pairingAttempts.error(m.from_id, p.reqId, p.reason);
+      if (res.outcome === "retry") {
+        $("pairing-err").textContent = `Código incorrecto (intento ${res.strikes} de ${MAX_CODE_STRIKES}). Revisalo y volvé a confirmar.`;
+      } else if (res.outcome === "exhausted") {
+        clearPairingTimers();
+        $("pairing-err").textContent =
+          "Código incorrecto 3 veces. Cancelá y generá un código nuevo en la app.";
+      } else if (res.outcome === "cleared") {
+        clearPairingTimers();
+        const why =
+          p.reason === "busy"
+            ? "La app está ocupada."
+            : p.reason === "rate"
+              ? "La app pidió esperar: hubo demasiados intentos."
+              : "La app rechazó la vinculación.";
+        $("pairing-err").textContent = `${why} Cancelá y empezá una vinculación nueva.`;
+      }
+      break;
+    }
     case "chat": {
-      if (p.kind === "app" && !pairedApps.has(m.from_id)) return;
+      // Autorización por presencia actual del remitente, jamás por campos
+      // del payload (kind/sid/name son afirmaciones falsificables).
+      if (!canAcceptIncomingContent(session, m.from_id, (id) => pairedApps.has(id))) return;
       const entry = session.addIncoming(m.from_id, m.from_name, p);
       if (!entry) return;
       renderDevices();
@@ -232,7 +308,7 @@ function handleRelay(m) {
       break;
     }
     case "file": {
-      if (p.kind === "app" && !pairedApps.has(m.from_id)) return;
+      if (!canAcceptIncomingContent(session, m.from_id, (id) => pairedApps.has(id))) return;
       const entry = session.addIncoming(m.from_id, m.from_name, p);
       if (!entry) return;
       renderDevices();
@@ -334,10 +410,14 @@ function renderDevices() {
 
     const text = el("span", "device-text");
     text.appendChild(el("span", "device-name", conv.name));
-    const isUnpairedApp = conv.kind === "app" && !pairedApps.has(conv.id) && conv.online;
+    const isApp = conv.kind === "app";
+    const isUnpairedApp = isApp && !pairedApps.has(conv.id) && conv.online;
+    const isPairedApp = isApp && pairedApps.has(conv.id);
     let preview;
     if (isUnpairedApp) {
       preview = "Vinculá con la app para conversar";
+    } else if (isPairedApp) {
+      preview = "Vinculada · envío de texto y archivos por hub disponible";
     } else if (conv.online || conv.messages.length > 0) {
       const last = conv.messages[conv.messages.length - 1];
       preview = last ? `${last.mine ? "Vos: " : ""}${last.text}` : "Sin mensajes todavía";
@@ -397,19 +477,35 @@ function renderView() {
   const status = $("conv-status");
   status.textContent = conv.online ? "En línea" : "Desconectado";
   status.classList.toggle("is-off", !conv.online);
+  $("app-send-note").classList.toggle(
+    "hidden",
+    !(conv.kind === "app" && pairedApps.has(conv.id)),
+  );
 
   renderThread();
   updateComposer();
 }
 
+// El texto y los archivos hacia una app emparejada viajan por el hub (frame
+// kind web); sin vinculación vigente, bloqueado.
+const isPairedApp = (id) => pairedApps.has(id);
+
+function canSendTo(id) {
+  return !!id && canSendTextTo(session, id, isPairedApp);
+}
+
+function canSendFile(id) {
+  return !!id && canSendFileTo(session, id, isPairedApp);
+}
+
 function updateComposer() {
   const id = session.selected();
   if (!id) return;
-  const can = session.canSend(id);
+  const can = canSendTo(id);
   const area = $("msg");
   area.disabled = !can;
   $("btn-send").disabled = !can;
-  $("btn-attach").disabled = !can;
+  $("btn-attach").disabled = !canSendFile(id);
   area.placeholder = !can
     ? conn.isOpen()
       ? "Esta sesión se desconectó: no se puede enviar"
@@ -512,7 +608,7 @@ $("btn-back").onclick = () => {
 function sendText() {
   const id = session.selected();
   const text = $("msg").value.trim();
-  if (!id || !text || !session.canSend(id)) return;
+  if (!id || !text || !canSendTo(id)) return;
   try {
     sendTextMessage(session, id, text, { relay: relayTo });
   } catch (err) {
@@ -573,7 +669,7 @@ function growArea() {
 // El destinatario se captura ANTES de la preparación async del archivo:
 // cambiar de conversación mientras prepara no redirige el envío.
 async function sendFileTo(peerId, file) {
-  if (!peerId) return;
+  if (!peerId || !canSendFile(peerId)) return;
   if (file.size > MAX_FILE) {
     session.system(peerId, "El archivo supera el máximo de 25 MB y no se envió.");
     if (session.selected() === peerId) renderThread();
@@ -610,7 +706,7 @@ async function sendFileTo(peerId, file) {
 }
 
 $("btn-attach").onclick = () => {
-  if (!session.canSend(session.selected())) return;
+  if (!canSendFile(session.selected())) return;
   $("file-input").click();
 };
 
@@ -639,41 +735,96 @@ window.addEventListener("drop", (e) => {
   dragDepth = 0;
   document.body.classList.remove("is-dragging");
   const peerId = session.selected(); // capturado antes del await
-  if (!peerId || !session.canSend(peerId)) return;
+  if (!peerId || !canSendFile(peerId)) return;
   for (const f of e.dataTransfer.files) sendFileTo(peerId, f);
 });
 
-// ── Vinculación con apps ─────────────────────────────────
+// ── Vinculación con apps (protocolo nativo con reqId) ────
+function closePairingOverlay() {
+  $("pairing").classList.add("hidden");
+  $("pairing-err").textContent = "";
+  $("pair-code").value = "";
+}
+
+function sendPairCancel(info) {
+  // Cancel correlacionada; si el socket ya no está, igual limpia lo local.
+  if (conn.isOpen() && session.isPresent(info.appId)) {
+    relayTo(info.appId, { type: "pair-cancel", reqId: info.reqId });
+  }
+}
+
+function scheduleRequestExpiry() {
+  requestTimer = setTimeout(() => {
+    requestTimer = null;
+    if (pairingAttempts.expired()) {
+      $("pairing-err").textContent =
+        "La solicitud de vinculación expiró. Cancelá y empezá de nuevo.";
+    }
+  }, REQUEST_TTL_MS);
+}
+
 function startPairing(conv) {
-  // Un intento nuevo reemplaza al anterior: su timeout queda sin efecto.
-  pairingAttempts.cancel();
-  pairingTargetId = conv.id;
-  relayTo(conv.id, { type: "pair-request" });
+  // Un intento nuevo reemplaza al anterior: cancela el reqId viejo y su
+  // pair-ok tardío queda sin efecto.
+  const stale = pairingAttempts.cancel();
+  if (stale) sendPairCancel(stale);
+  clearPairingTimers();
+  const reqId = newReqId();
+  pairingAttempts.start(conv.id, reqId);
+  if (!relayTo(conv.id, { type: "pair-request", reqId })) {
+    pairingAttempts.cancel();
+    $("pairing-err").textContent = "Sin conexión con el hub. Probá de nuevo.";
+    return;
+  }
+  scheduleRequestExpiry();
   $("pair-title").textContent = `Vincular con ${conv.name}`;
   $("pair-hint").textContent = `En ${conv.name} va a aparecer un código de vinculación. Escribilo acá:`;
-  $("pair-code").value = "";
   $("pairing-err").textContent = "";
+  $("pair-code").value = "";
   $("pairing").classList.remove("hidden");
   $("pair-code").focus();
 }
 
 function confirmPairing() {
+  const pending = pairingAttempts.pending();
+  if (!pending) return;
   const code = $("pair-code").value.trim();
-  const target = pairingTargetId;
-  if (code.length < 4 || !target) return;
-  if (pairingAttempts.pending() === target) return; // ya esperando respuesta
-  relayTo(target, { type: "pair-verify", code });
-  pairingAttempts.start(target);
+  if (!CODE_PATTERN.test(code)) {
+    $("pairing-err").textContent = "El código tiene 8 dígitos numéricos.";
+    return;
+  }
+  if (pairingAttempts.awaitingVerify()) return; // ya esperando esta verificación
+  if (!relayTo(pending.appId, { type: "pair-verify", code, reqId: pending.reqId })) {
+    $("pairing-err").textContent = "Sin conexión con el hub. Probá de nuevo.";
+    return;
+  }
+  pairingAttempts.armVerify();
+  clearTimeout(verifyTimer);
+  verifyTimer = setTimeout(() => {
+    verifyTimer = null;
+    // El intento sigue vivo dentro del TTL: se puede reintentar el mismo código.
+    if (pairingAttempts.verifyTimedOut()) {
+      $("pairing-err").textContent = "No respondió. ¿Es el código correcto? Volvé a confirmar.";
+    }
+  }, VERIFY_TIMEOUT_MS);
 }
 
 $("btn-pair").onclick = confirmPairing;
 $("pair-code").addEventListener("keydown", (e) => {
   if (e.key === "Enter") confirmPairing();
 });
+$("pair-code").addEventListener("input", () => {
+  // Solo dígitos; maxlength 8 lo completa el input.
+  const input = $("pair-code");
+  const digits = input.value.replace(/\D/g, "").slice(0, 8);
+  if (digits !== input.value) input.value = digits;
+  $("pairing-err").textContent = "";
+});
 $("btn-pair-cancel").onclick = () => {
-  pairingAttempts.cancel();
-  pairingTargetId = null;
-  $("pairing").classList.add("hidden");
+  const info = pairingAttempts.cancel();
+  clearPairingTimers();
+  if (info) sendPairCancel(info);
+  closePairingOverlay();
 };
 
 // ── Limpieza y ciclo de vida ─────────────────────────────

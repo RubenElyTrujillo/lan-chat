@@ -131,6 +131,40 @@ button {
   border-radius: 999px;
 }
 
+.hub-chip {
+  white-space: nowrap;
+}
+
+.hub-chip .hub-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gray-dot);
+  flex: none;
+}
+
+.hub-chip.hub-ok .hub-dot {
+  background: var(--green);
+}
+
+.hub-chip.hub-retry .hub-dot {
+  background: var(--amber-ink);
+}
+
+.hub-chip.hub-off .hub-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--gray-dot);
+}
+
+.hub-chip.hub-demo {
+  color: var(--amber-ink);
+  background: var(--amber-bg);
+}
+
+.hub-chip.hub-demo .hub-dot {
+  background: var(--amber-ink);
+}
+
 .demo-badge {
   font-size: 12px;
   font-weight: 600;
@@ -313,6 +347,40 @@ button {
   color: var(--ink-3);
   flex: none;
   font-variant-numeric: tabular-nums;
+}
+
+/* Sesiones de navegador del hub: etiqueta pequeña junto al nombre y detalle
+   honesto de presencia únicamente. Reutilizan los tokens existentes. */
+.hub-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ground);
+  color: var(--ink-3);
+  font-size: 10.5px;
+  font-weight: 550;
+  vertical-align: 1px;
+}
+
+.hub-detail {
+  justify-content: center;
+  text-align: center;
+  gap: 6px;
+}
+
+.hub-detail-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.hub-detail-sub {
+  margin: 0 auto;
+  max-width: 40ch;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .list-empty {
@@ -896,4 +964,118 @@ button {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* Vinculación de navegadores vía hub: carril propio, separado del modal LAN.
+   Tarjetas compactas arriba a la derecha: nunca tapan el chat ni bloquean la
+   lista; se difieren cuando hay un modal LAN abierto. */
+.hub-pair {
+  position: fixed;
+  top: 56px;
+  right: 16px;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(264px, calc(100vw - 32px));
+}
+
+.hub-pair-heading {
+  margin: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #585c63;
+}
+
+.hub-pair-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #232630;
+  color: #f2f3f5;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+}
+
+.hub-pair-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.hub-pair-name {
+  font-size: 14px;
+  font-weight: 650;
+  color: #f2f3f5;
+  overflow-wrap: anywhere;
+}
+
+.hub-pair-why {
+  font-size: 11.5px;
+  opacity: 0.72;
+  color: #f2f3f5;
+}
+
+.hub-pair-code {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 5px;
+  text-align: center;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px dashed rgba(128, 128, 128, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-pair-timer {
+  font-size: 11.5px;
+  opacity: 0.78;
+  color: #f2f3f5;
+  font-variant-numeric: tabular-nums;
+}
+
+.hub-pair-expired {
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  opacity: 0.75;
+}
+
+.hub-pair-card .hub-pair-cancel {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: #f2f3f5;
+  font-size: 13px;
+  padding: 7px 14px;
+}
+
+.hub-pair-card .hub-pair-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hub-pair-error {
+  margin: 0;
+  font-size: 11.5px;
+  color: #ff9d94;
+}
+
+.hub-paired-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 2px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #f7f7f8;
+  border: 1px solid #ececee;
+  color: #585c63;
+  font-size: 11px;
+  font-weight: 550;
+  width: fit-content;
 }

@@ -7,6 +7,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { parseTrustedProxies, resolveClientIp } from "./trust-proxy.js";
+import { parsePresence } from "./presence.js";
 
 const PORT = process.env.PORT || 8788;
 const MAX_MSG = 40 * 1024 * 1024; // 40 MB (archivos base64 por relay)
@@ -23,7 +24,7 @@ const MIME = {
   ".svg": "image/svg+xml",
 };
 
-const peers = new Map(); // ws -> { id, name, kind, ip }
+const peers = new Map(); // ws -> { id, name, kind, ip, sid?, caps? }
 const groups = new Map(); // ip -> Set<ws>
 
 const publicIp = (req) =>
@@ -58,7 +59,15 @@ const wss = new WebSocketServer({ server, maxPayload: MAX_MSG });
 function broadcastPeers(ip) {
   const group = groups.get(ip);
   if (!group) return;
-  const list = [...group].map((p) => ({ id: p.id, name: p.name, kind: p.kind }));
+  // Presence metadata (sid/caps) rides along only when the peer registered a
+  // valid one; legacy peers are broadcast exactly as before.
+  const list = [...group].map((p) => ({
+    id: p.id,
+    name: p.name,
+    kind: p.kind,
+    ...(p.sid ? { sid: p.sid } : {}),
+    ...(p.caps ? { caps: p.caps } : {}),
+  }));
   const data = JSON.stringify({ type: "peers", list });
   for (const p of group) if (p.readyState === 1) p.send(data);
 }
@@ -80,6 +89,8 @@ wss.on("connection", (ws, req) => {
     if (m.type === "hello") {
       ws.name = String(m.name || "anónimo").slice(0, 24);
       ws.kind = m.kind === "app" ? "app" : "web";
+      // Valid presence metadata only; anything malformed is simply absent.
+      Object.assign(ws, parsePresence(m));
       let group = groups.get(ws.ip);
       if (!group) {
         group = new Set();
@@ -98,6 +109,8 @@ wss.on("connection", (ws, req) => {
     }
 
     // Relay: entregar el payload al par destino del mismo grupo (misma IP pública).
+    // from_sid se toma de la conexión REGISTRADA que envía: el payload jamás
+    // puede atribuirse una identidad que no anunció en su hello.
     if (m.type === "relay" && m.to) {
       const group = groups.get(ws.ip) || [];
       for (const peer of group) {
@@ -107,6 +120,7 @@ wss.on("connection", (ws, req) => {
               type: "relay",
               from_id: ws.id,
               from_name: ws.name,
+              ...(ws.sid ? { from_sid: ws.sid } : {}),
               payload: m.payload,
             }),
           );
@@ -127,3 +141,6 @@ wss.on("connection", (ws, req) => {
 server.listen(PORT, () => {
   console.log(`LAN-Chat Hub escuchando en http://0.0.0.0:${PORT}`);
 });
+
+// Exported for integration tests (ephemeral PORT=0) to discover the bound port.
+export { server };

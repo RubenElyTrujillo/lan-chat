@@ -960,3 +960,14 @@ button {
     font-size: 12.5px;
   }
 }
+
+/* Nota de envío pendiente para apps emparejadas (transporte nativo de chat no implementado) */
+.app-note {
+  margin: 0;
+  padding: 8px 20px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
+  background: var(--paper-2, rgba(0, 0, 0, 0.03));
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}

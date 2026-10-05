@@ -25,6 +25,40 @@ const defaultUrls = {
   },
 };
 
+/**
+ * Inbound gate for relayed chat/file content. The verdict is sourced ONLY
+ * from current hub presence for the sender's connection ID — never from
+ * payload fields (kind, sid and name are claims any sender can forge):
+ * unknown or departed senders fail closed; a known "app" sender must be
+ * paired; a known web sender is accepted. `isPaired(senderId)` reports the
+ * caller's current pairing state.
+ */
+export function canAcceptIncomingContent(session, senderId, isPaired) {
+  if (!session?.isPresent(senderId)) return false;
+  return session.presenceKind(senderId) === "app" ? isPaired?.(senderId) === true : true;
+}
+
+/**
+ * Outgoing TEXT gate for relayed chat. A web peer is sendable while present;
+ * an app peer needs its CURRENT pairing (`isPaired` reports it). Presence and
+ * socket state come from the session, never from payload claims.
+ */
+export function canSendTextTo(session, peerId, isPaired) {
+  if (!session?.canSend(peerId)) return false;
+  const conv = session.conversation(peerId);
+  if (!conv) return false;
+  return conv.kind !== "app" || isPaired?.(peerId) === true;
+}
+
+/**
+ * Outgoing FILE gate: files travel to web peers and to CURRENTLY PAIRED app
+ * peers (same hub relay as text, capped at 25 MiB client-side). Verdict is
+ * the text gate: presence + socket from the session, pairing from `isPaired`.
+ */
+export function canSendFileTo(session, peerId, isPaired) {
+  return canSendTextTo(session, peerId, isPaired);
+}
+
 export function createSession({ now = Date.now, uid = defaultUid, urls = defaultUrls } = {}) {
   const conversations = new Map(); // peerId -> {id, name, kind, online, messages, unread, draft}
   const present = new Map(); // peerId -> {id, name, kind}
@@ -94,6 +128,11 @@ export function createSession({ now = Date.now, uid = defaultUid, urls = default
 
     isPresent(id) {
       return present.has(id);
+    },
+
+    /** Current presence kind for a peer id, or null when unknown/departed. */
+    presenceKind(id) {
+      return present.get(id)?.kind ?? null;
     },
 
     presentPeers() {
@@ -242,7 +281,7 @@ export async function sendFile(session, peerId, file, { relay = () => {} } = {})
   const bytes = await file.prepare();
   if (!session.canSend(peerId)) throw new Error("peer-unavailable");
   const id = session.newId();
-  relay(peerId, { type: "file", name: file.name, bytes, id });
+  relay(peerId, { type: "file", name: file.name, bytes, kind: "web", id });
   const entry = session.addOutgoing(peerId, {
     type: "file",
     name: file.name,

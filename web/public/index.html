@@ -9,7 +9,7 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2317181a'/%3E%3Cpath d='M9 11.5c0-1.4 1.1-2.5 2.5-2.5h9A2.5 2.5 0 0 1 23 11.5v6a2.5 2.5 0 0 1-2.5 2.5H14l-3.6 3v-3H11.5A2.5 2.5 0 0 1 9 17.5z' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linejoin='round'/%3E%3C/svg%3E"
     />
     <title>LAN-Chat</title>
-    <link rel="stylesheet" href="/style.css?v=20261003b" />
+    <link rel="stylesheet" href="/style.css?v=20261004a" />
   </head>
   <body>
     <main class="app">
@@ -87,6 +87,9 @@
               </div>
               <span class="net-chip">efímero</span>
             </header>
+            <p id="app-send-note" class="app-note hidden" role="status">
+              Vinculado · envío de texto y archivos por hub disponible
+            </p>
             <div class="conv-scroll" id="thread" role="log" aria-live="polite"></div>
             <footer class="composer">
               <button type="button" id="btn-attach" class="icon-btn" aria-label="Adjuntar archivo" title="Adjuntar archivo (máximo 25 MB)">
@@ -109,7 +112,7 @@
         <div class="pin-card">
           <h3 id="pair-title">Vincular con la app</h3>
           <p id="pair-hint">En la app de escritorio va a aparecer un código de vinculación. Escribilo acá:</p>
-          <input id="pair-code" placeholder="CÓDIGO" maxlength="6" inputmode="numeric" autocomplete="off" />
+          <input id="pair-code" placeholder="CÓDIGO" maxlength="8" inputmode="numeric" autocomplete="off" aria-label="Código de vinculación de 8 dígitos" />
           <p id="pairing-err" class="pin-error" role="alert"></p>
           <div class="pin-actions">
             <button type="button" id="btn-pair-cancel" class="pill pill-ghost">Cancelar</button>
@@ -134,6 +137,6 @@
       </div>
     </main>
     <input id="file-input" type="file" hidden />
-    <script type="module" src="/app.js?v=20261003b"></script>
+    <script type="module" src="/app.js?v=20261004a"></script>
   </body>
 </html>

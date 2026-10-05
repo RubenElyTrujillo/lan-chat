@@ -118,6 +118,7 @@ export function Conversation({
   onAttach,
   onRetry,
   onDelete,
+  attachDisabled = false,
 }: {
   device: DeviceState;
   entries: Entry[];
@@ -127,6 +128,8 @@ export function Conversation({
   onAttach: () => void;
   onRetry: (id: string) => void;
   onDelete: () => void;
+  /** Caller decides; hub contacts and LAN rows attach like LAN text does. */
+  attachDisabled?: boolean;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const prevKeyRef = useRef(device.key);
@@ -196,7 +199,11 @@ export function Conversation({
         )}
       </div>
 
-      <Composer onSend={onSend} onAttach={onAttach} />
+      <Composer
+        onSend={onSend}
+        onAttach={onAttach}
+        attachDisabled={attachDisabled}
+      />
     </section>
   );
 }
@@ -204,9 +211,11 @@ export function Conversation({
 function Composer({
   onSend,
   onAttach,
+  attachDisabled = false,
 }: {
   onSend: (text: string) => void;
   onAttach: () => void;
+  attachDisabled?: boolean;
 }) {
   const [text, setText] = useState("");
   const areaRef = useRef<HTMLTextAreaElement>(null);
@@ -232,8 +241,9 @@ function Composer({
         type="button"
         className="icon-btn"
         aria-label="Adjuntar archivo"
-        title="Adjuntar archivo"
+        title={attachDisabled ? "Adjuntar archivos: pronto" : "Adjuntar archivo"}
         onClick={onAttach}
+        disabled={attachDisabled}
       >
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden>
           <path d="M9 3.5v11M3.5 9h11" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />

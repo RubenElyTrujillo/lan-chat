@@ -2,7 +2,7 @@
 // Run: npm test (from web/)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSession, normalizeIncoming, sendFile, sendTextMessage, handlePageHide, handlePageShow } from "../public/client-state.js";
+import { createSession, normalizeIncoming, sendFile, sendTextMessage, handlePageHide, handlePageShow, canAcceptIncomingContent } from "../public/client-state.js";
 
 const T0 = 1_700_000_000_000;
 
@@ -471,4 +471,157 @@ test("pageshow without persisted (normal load) does nothing", () => {
   assert.deepEqual(notified, []);
   // unchanged: presence was never reconciled by a pageshow of a fresh load
   assert.equal(session.canSend("a1"), true);
+});
+
+// ── Inbound relay gate: presence-sourced authorization ────
+// The verdict for incoming chat/file content must come ONLY from current hub
+// presence metadata for the sender's connection ID. Payload fields (kind,
+// sid, name) are untrusted claims: any client can assert them.
+
+// Exact wiring app.js uses at its chat and file relay call sites.
+function gate(session, senderId, pairedApps) {
+  return canAcceptIncomingContent(session, senderId, (id) => pairedApps.has(id));
+}
+
+test("unknown sender is rejected even when it claims to be paired", () => {
+  const { session } = makeSession();
+  const pairedApps = new Set(["ghost"]); // malicious claim, no presence entry
+  assert.equal(gate(session, "ghost", pairedApps), false, "unknown sender fails closed");
+});
+
+test("unpaired known app is rejected even when the payload spoofs kind web", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  const pairedApps = new Set();
+  // The gate never sees the payload: a kind:"web" claim cannot authorize.
+  assert.equal(gate(session, "a1", pairedApps), false, "spoofed kind must be rejected");
+});
+
+test("unpaired known app with a missing kind field is rejected", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  const pairedApps = new Set();
+  assert.equal(gate(session, "a1", pairedApps), false, "absent kind claim must not authorize");
+});
+
+test("known app paired through a real grant is accepted", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  const pairedApps = new Set(["a1"]);
+  assert.equal(gate(session, "a1", pairedApps), true, "paired app content is accepted");
+});
+
+test("known web sender is accepted unpaired, regardless of payload kind", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["w1", "Wanda"]));
+  const pairedApps = new Set();
+  assert.equal(gate(session, "w1", pairedApps), true, "web content needs no pairing");
+});
+
+test("departed peer is rejected even if still marked paired", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  const pairedApps = new Set(["a1"]);
+  assert.equal(gate(session, "a1", pairedApps), true);
+  session.applyPeers([]); // peer left the hub
+  assert.equal(gate(session, "a1", pairedApps), false, "gone presence fails closed");
+  assert.equal(session.presenceKind("a1"), null);
+});
+
+test("presenceKind mirrors current presence and fails closed for unknown ids", () => {
+  const { session } = makeSession();
+  assert.equal(session.presenceKind("x1"), null);
+  session.applyPeers(peersOf(["x1", "Xime", "app"]));
+  assert.equal(session.presenceKind("x1"), "app");
+  session.applyPeers(peersOf(["x1", "Xime", "web"]));
+  assert.equal(session.presenceKind("x1"), "web");
+});
+
+test("relay gate keeps a spoofed app message out of the conversation", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  const pairedApps = new Set();
+  const spoofed = { type: "chat", text: "inyectado", kind: "web" };
+  if (gate(session, "a1", pairedApps)) {
+    session.addIncoming("a1", "App", spoofed);
+  }
+  assert.equal(session.conversation("a1").messages.length, 0, "no entry for a rejected sender");
+});
+
+// ── Text vs file gates for app peers (paired apps can chat over the hub) ────
+
+test("canSendTextTo allows a paired online app peer", async () => {
+  const { canSendTextTo } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendTextTo(session, "a1", (id) => id === "a1"), true);
+});
+
+test("canSendTextTo rejects an unpaired app peer", async () => {
+  const { canSendTextTo } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendTextTo(session, "a1", () => false), false);
+});
+
+test("canSendTextTo fails closed for an app peer that left, even if paired", async () => {
+  const { canSendTextTo } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  session.applyPeers([]);
+  assert.equal(canSendTextTo(session, "a1", () => true), false);
+});
+
+test("canSendFileTo allows a paired app peer (files travel like text)", async () => {
+  const { canSendFileTo } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendFileTo(session, "a1", (id) => id === "a1"), true);
+});
+
+test("canSendFileTo rejects an unpaired app peer", async () => {
+  const { canSendFileTo } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendFileTo(session, "a1", () => false), false);
+});
+
+test("canSendFileTo still allows web peers", async () => {
+  const { canSendFileTo } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["w1", "Web"]));
+  assert.equal(canSendFileTo(session, "w1", () => false), true);
+});
+
+test("paired app file send relays a file frame with kind web", async () => {
+  const { canSendFileTo, sendFile } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendFileTo(session, "a1", (id) => id === "a1"), true);
+  const frames = [];
+  await sendFile(
+    session,
+    "a1",
+    { name: "foto.png", size: 4, prepare: () => Promise.resolve(new Uint8Array([1, 2, 3, 4])) },
+    { relay: (id, frame) => frames.push([id, frame]) },
+  );
+  const [peerId, frame] = frames[0];
+  assert.equal(peerId, "a1");
+  assert.equal(frame.type, "file");
+  assert.equal(frame.kind, "web");
+  assert.equal(frame.name, "foto.png");
+  assert.ok(frame.id);
+});
+
+test("paired app text send emits a chat frame with kind web", async () => {
+  const { canSendTextTo, sendTextMessage } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendTextTo(session, "a1", (id) => id === "a1"), true);
+  const frames = [];
+  sendTextMessage(session, "a1", "hola", { relay: (id, frame) => frames.push([id, frame]) });
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0][0], "a1");
+  assert.equal(frames[0][1].type, "chat");
+  assert.equal(frames[0][1].kind, "web");
 });
