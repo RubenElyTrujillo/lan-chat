@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
+import { useDismiss } from "./useDismiss";
 
 export interface MenuItem {
   label: string;
@@ -11,33 +12,11 @@ export function Menu({ items, label }: { items: MenuItem[]; label: string }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState<number | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-        setConfirming(null);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setOpen(false);
-        setConfirming(null);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const close = () => {
+  const close = useCallback(() => {
     setOpen(false);
     setConfirming(null);
-  };
+  }, []);
+  useDismiss(rootRef, open, close);
 
   return (
     <div className="menu" ref={rootRef}>

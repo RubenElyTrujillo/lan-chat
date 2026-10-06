@@ -245,3 +245,64 @@ export function onHubFileError(
 ): Promise<() => void> {
   return listen<RawHubFileError>("hub-file-error", (event) => handler(event.payload));
 }
+
+// Portapapeles compartido: lectura/escritura local acotada nativamente
+// (vacío o >64k chars → Err "invalid-text").
+export function readClipboard(): Promise<string> {
+  return invoke<string>("read_clipboard");
+}
+
+export function writeClipboard(text: string): Promise<void> {
+  return invoke("write_clipboard", { text });
+}
+
+// Envío de portapapeles a un contacto del hub: mismo contrato que
+// hub_send_text, con Err adicional "invalid-text" por el tope nativo.
+export function hubSendClipboard(key: string, id: string, text: string): Promise<string> {
+  return invoke<string>("hub_send_clipboard", { key, id, text });
+}
+
+// Envío de portapapeles a un dispositivo LAN pin-eado: mismo acuse que
+// send_text; Ok es siempre "sent" y Err pasa honesto ("PIN_REQUERIDO"
+// incluido).
+export function lanSendClipboard(
+  ip: string,
+  pin: string,
+  id: string,
+  texto: string,
+): Promise<string> {
+  return invoke<string>("lan_send_clipboard", { ip, pin, id, texto });
+}
+
+// Atajo global Cmd+Shift+V (registrado nativamente): evento sin payload.
+export function onClipboardShortcut(handler: () => void): Promise<() => void> {
+  return listen("clipboard-send-requested", () => handler());
+}
+
+export interface RawHubClipboard {
+  key: string;
+  name: string;
+  text: string;
+  id: string;
+}
+
+// Portapapeles entrante: ya fue persistido nativamente ANTES del evento (la
+// fila existe en la DB); la UI hidrata con el id del wire.
+export function onHubClipboardReceived(
+  handler: (msg: RawHubClipboard) => void,
+): Promise<() => void> {
+  return listen<RawHubClipboard>("hub-clipboard-received", (event) => handler(event.payload));
+}
+
+export interface RawLanClipboard {
+  from: string;
+  text: string;
+}
+
+// Portapapeles LAN entrante: el nativo ya escribió el portapapeles local y
+// message-received ya agregó la fila; este evento es SOLO el aviso (toast).
+export function onLanClipboardReceived(
+  handler: (msg: RawLanClipboard) => void,
+): Promise<() => void> {
+  return listen<RawLanClipboard>("lan-clipboard-received", (event) => handler(event.payload));
+}

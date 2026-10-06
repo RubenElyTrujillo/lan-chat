@@ -178,9 +178,9 @@ pub fn load_contacts(conn: &Connection) -> Result<HashMap<String, String>, Strin
 /// so without this every history image breaks after a restart). Best-effort
 /// read: an unusable `messages` table yields an empty vec.
 pub fn file_paths(conn: &Connection) -> Vec<String> {
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT DISTINCT file_path FROM messages WHERE file_path IS NOT NULL",
-    ) else {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT DISTINCT file_path FROM messages WHERE file_path IS NOT NULL")
+    else {
         return Vec::new();
     };
     stmt.query_map([], |row| row.get::<_, String>(0))
@@ -313,12 +313,19 @@ pub fn patch_message_state(
 /// Deletes one conversation's rows and bumps `hist_rev:<key>` in one
 /// transaction; returns the key's fresh token. Rev metadata is kept after
 /// the rows are gone, so stale callers are rejected even for keys that no
-/// longer exist in `messages`. DB-ONLY: files and folders referenced by
-/// deleted rows are never touched.
+/// longer exist in `messages`. For `hub:<uuid>` keys the matching
+/// `hub_contacts` row is dropped in the same transaction: a conversation
+/// delete is the ONLY way to remove that stored contact, so leaving it
+/// behind would resurrect an empty, undeletable ghost row. DB-ONLY: files
+/// and folders referenced by deleted rows are never touched.
 pub fn delete_conversation(conn: &mut Connection, device_key: &str) -> Result<HistToken, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM messages WHERE device_key = ?1", [device_key])
         .map_err(|e| e.to_string())?;
+    if let Some(uuid) = device_key.strip_prefix(HUB_KEY_PREFIX) {
+        tx.execute("DELETE FROM hub_contacts WHERE uuid = ?1", [uuid])
+            .map_err(|e| e.to_string())?;
+    }
     let token = HistToken {
         epoch: hist_epoch(&tx)?,
         rev: hist_rev(&tx, device_key)? + 1,
@@ -818,13 +825,34 @@ mod tests {
     }
 
     #[test]
+    fn delete_conversation_drops_matching_hub_contact_row_in_same_tx() {
+        let mut conn = temp_db("delcontact");
+        ensure_history_schema(&conn).unwrap();
+        upsert_contact(&conn, "u-1", "Ana").unwrap();
+        upsert_contact(&conn, "u-2", "Beto").unwrap();
+        let tk = token(&conn, "hub:u-1");
+        append_message(&mut conn, &entry("m1", "hola"), "hub:u-1", tk).unwrap();
+        delete_conversation(&mut conn, "hub:u-1").unwrap();
+        let map = load_contacts(&conn).unwrap();
+        assert!(
+            !map.contains_key("hub:u-1"),
+            "deleting a hub: conversation removes its stored contact row"
+        );
+        assert_eq!(
+            map.get("hub:u-2").map(String::as_str),
+            Some("Beto"),
+            "other contacts stay intact"
+        );
+        // Non-hub keys never touch the contacts table.
+        delete_conversation(&mut conn, "lan-device").unwrap();
+        assert_eq!(load_contacts(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
     fn file_paths_collects_distinct_non_null_paths() {
         let conn = temp_db("paths");
         ensure_history_schema(&conn).unwrap();
-        assert!(
-            file_paths(&conn).is_empty(),
-            "empty DB yields an empty vec"
-        );
+        assert!(file_paths(&conn).is_empty(), "empty DB yields an empty vec");
         // Two rows share 'files/a.bin' (DISTINCT collapses them); NULL
         // file_path rows are skipped entirely.
         for (id, fp) in [

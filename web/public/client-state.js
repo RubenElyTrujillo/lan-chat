@@ -9,12 +9,20 @@ export function normalizeIncoming(payload) {
     if (typeof payload.text !== "string" || payload.text.length === 0) return null;
     return { type: "chat", text: payload.text };
   }
+  if (payload.type === "clipboard") {
+    if (typeof payload.text !== "string" || payload.text.length === 0) return null;
+    if (payload.text.length > MAX_CLIPBOARD_CHARS) return null;
+    return { type: "clipboard", text: payload.text };
+  }
   if (payload.type === "file") {
     if (typeof payload.name !== "string" || typeof payload.data !== "string") return null;
     return { type: "file", name: payload.name, data: payload.data };
   }
   return null;
 }
+
+/** Shared clipboard bound, matching the desktop app. */
+const MAX_CLIPBOARD_CHARS = 64_000;
 
 const defaultUrls = {
   create(bytes) {
@@ -186,7 +194,7 @@ export function createSession({ now = Date.now, uid = defaultUid, urls = default
       conv.online = true;
       if (fromName) conv.name = fromName;
       let entry;
-      if (p.type === "chat") {
+      if (p.type === "chat" || p.type === "clipboard") {
         entry = makeEntry("text", false, { text: p.text });
       } else {
         entry = makeEntry("file", false, {
@@ -306,6 +314,25 @@ export function sendTextMessage(session, peerId, text, { relay = () => {} } = {}
   if (!session.canSend(peerId)) throw new Error("peer-unavailable");
   const id = session.newId();
   const ok = relay(peerId, { type: "chat", text, kind: "web", id });
+  if (ok === false) throw new Error("no-connection");
+  return session.addOutgoing(peerId, { type: "text", text, id });
+}
+
+/**
+ * Send shared clipboard text to an explicit recipient. Mirrors sendTextMessage:
+ * the relay runs BEFORE the outgoing entry, a `false` relay return is
+ * "no-connection", relay errors propagate, and an unavailable recipient is
+ * "peer-unavailable" before anything is sent. Payloads over the shared 64k
+ * bound are rejected up front with "clipboard-too-long", matching the inbound
+ * normalization.
+ */
+export function sendClipboard(session, peerId, text, { relay = () => {} } = {}) {
+  if (!session.canSend(peerId)) throw new Error("peer-unavailable");
+  if (typeof text !== "string" || text.length > MAX_CLIPBOARD_CHARS) {
+    throw new Error("clipboard-too-long");
+  }
+  const id = session.newId();
+  const ok = relay(peerId, { type: "clipboard", text, kind: "web", id });
   if (ok === false) throw new Error("no-connection");
   return session.addOutgoing(peerId, { type: "text", text, id });
 }

@@ -5,6 +5,7 @@ import {
   canSendFileTo,
   canSendTextTo,
   createSession,
+  sendClipboard,
   sendFile,
   sendTextMessage,
   handlePageHide,
@@ -307,6 +308,19 @@ function handleRelay(m) {
       if (session.selected() === m.from_id) renderView();
       break;
     }
+    case "clipboard": {
+      // Mismo gate que chat: presencia actual, jamás campos del payload.
+      // Entra a la conversación como burbuja de texto copiable y, si el
+      // navegador lo permite, queda también en el portapapeles local. La
+      // escritura es silenciosa: ningún falla genera ruido en la UI.
+      if (!canAcceptIncomingContent(session, m.from_id, (id) => pairedApps.has(id))) return;
+      const entry = session.addIncoming(m.from_id, m.from_name, p);
+      if (!entry) return;
+      renderDevices();
+      if (session.selected() === m.from_id) renderView();
+      copyIncomingClipboard(m.from_id, entry, p.text);
+      break;
+    }
     case "file": {
       if (!canAcceptIncomingContent(session, m.from_id, (id) => pairedApps.has(id))) return;
       const entry = session.addIncoming(m.from_id, m.from_name, p);
@@ -506,6 +520,8 @@ function updateComposer() {
   area.disabled = !can;
   $("btn-send").disabled = !can;
   $("btn-attach").disabled = !canSendFile(id);
+  $("btn-paste").classList.toggle("hidden", !can);
+  $("btn-paste").disabled = !can;
   area.placeholder = !can
     ? conn.isOpen()
       ? "Esta sesión se desconectó: no se puede enviar"
@@ -560,6 +576,7 @@ function renderEntry(e, grouped) {
   const bubble = el("div", "bubble");
   if (e.kind === "text") {
     bubble.classList.add("is-copyable");
+    bubble.dataset.id = e.id;
     bubble.title = "Tocar para copiar";
     bubble.appendChild(el("span", "bubble-text", e.text));
   } else {
@@ -596,6 +613,26 @@ function renderEntry(e, grouped) {
 
   row.appendChild(bubble);
   return row;
+}
+
+// Clipboard compartido entrante: se intenta copiar el texto al portapapeles
+// local en silencio. El aviso "Copiado" reaproveita el patrón del toque para
+// copiar y sólo aparece si la escritura realmente resolvió y la conversación
+// sigue visible; cualquier falla (contexto inseguro, permiso) no genera ruido.
+function copyIncomingClipboard(peerId, entry, text) {
+  const clip = navigator.clipboard;
+  if (!clip?.writeText) return;
+  clip
+    .writeText(text)
+    .then(() => {
+      if (session.selected() !== peerId) return;
+      const bubble = document.querySelector(`#thread .bubble[data-id="${entry.id}"]`);
+      const meta = bubble?.querySelector(".bubble-meta");
+      if (!meta) return;
+      meta.textContent = "Copiado";
+      setTimeout(() => (meta.textContent = clockTime(entry.at)), 1200);
+    })
+    .catch(() => {});
 }
 
 $("btn-back").onclick = () => {
@@ -664,6 +701,57 @@ function growArea() {
   area.style.height = "0px";
   area.style.height = `${Math.min(area.scrollHeight, 120)}px`;
 }
+
+// ── Pegar y enviar (portapapeles compartido) ─────────────
+// La lectura del portapapeles ocurre dentro del gesto del usuario. Vacío o
+// falla de lectura: aviso inline (reusa el contador del composer), sin ruido
+// del sistema. Con texto: el mismo camino que un mensaje de texto, con el
+// tope de 64k compartido con el otro lado.
+async function sendPaste() {
+  const id = session.selected();
+  if (!id || !canSendTo(id)) return;
+  let text;
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    showPasteHint("No se pudo leer el portapapeles");
+    return;
+  }
+  if (!text.trim()) {
+    showPasteHint("El portapapeles está vacío");
+    return;
+  }
+  try {
+    sendClipboard(session, id, text, { relay: relayTo });
+  } catch (err) {
+    if (String(err?.message) === "clipboard-too-long") {
+      showPasteHint("El portapapeles supera el máximo de 64.000 caracteres");
+      return;
+    }
+    // Falla de encolado local, no acuse de entrega.
+    reportTextSendFailure(id, err);
+    return;
+  }
+  renderDevices();
+  renderView();
+}
+
+function showPasteHint(text) {
+  const hint = $("msg-count");
+  hint.hidden = false;
+  hint.textContent = text;
+  setTimeout(() => {
+    // Si mientras tanto se escribió algo, manda el contador de caracteres.
+    const len = $("msg").value.length;
+    if (len > 460) {
+      hint.textContent = String(500 - len);
+    } else {
+      hint.hidden = true;
+    }
+  }, 2000);
+}
+
+$("btn-paste").onclick = sendPaste;
 
 // ── Archivos ─────────────────────────────────────────────
 // El destinatario se captura ANTES de la preparación async del archivo:

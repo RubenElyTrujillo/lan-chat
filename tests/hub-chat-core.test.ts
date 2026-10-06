@@ -8,6 +8,7 @@ import {
   HUB_SYSTEM_PAIR_REQUIRED,
   HUB_SYSTEM_PEER_OFFLINE,
   buildHubRows,
+  canDeleteRow,
   hubFileErrorNotice,
   hubSendOutcome,
   isContactKey,
@@ -22,7 +23,7 @@ import {
 } from "../src/lib/hub-chat-core.ts";
 import { isHubKey } from "../src/lib/hub-presence.ts";
 import type { HubPeer } from "../src/lib/hub-presence.ts";
-import type { DeviceState } from "../src/types.ts";
+import type { DeviceState, Entry } from "../src/types.ts";
 
 const PEER = (over: Partial<HubPeer> = {}): HubPeer => ({
   conn_id: "c1",
@@ -33,6 +34,21 @@ const PEER = (over: Partial<HubPeer> = {}): HubPeer => ({
 });
 
 const CONTACTS = { "hub:u-1": "Navegador de salón", "hub:u-2": "Tablet de Ana" };
+
+const ENTRY = (id: string, mine: boolean, text: string): Entry => ({
+  id,
+  mine,
+  text,
+  at: 1,
+  read: true,
+});
+
+// Both fixture contacts have messages: with the dead-row pruning rule, a
+// contact row renders only with messages>0 or a live online binding.
+const HISTORY = {
+  "hub:u-1": [ENTRY("m1", true, "hola")],
+  "hub:u-2": [ENTRY("m2", false, "chau")],
+};
 
 // ── Key + routing decision (hub vs lan vs optimistic) ───────────────────────
 
@@ -97,6 +113,7 @@ test("hubSendOutcome: unknown errors fail with a generic honest line", () => {
 test("contacts become offline hub conversation rows named from contacts", () => {
   const { rows, pairedKeys } = buildHubRows({
     contacts: CONTACTS,
+    history: HISTORY,
     peers: [],
     pairedConnIds: new Set(),
     contactForConn: new Map(),
@@ -114,6 +131,7 @@ test("contacts become offline hub conversation rows named from contacts", () => 
 test("a live peer with a grant and a known binding merges into ONE online contact row", () => {
   const { rows, pairedKeys } = buildHubRows({
     contacts: CONTACTS,
+    history: HISTORY,
     peers: [PEER()],
     pairedConnIds: new Set(["c1"]),
     contactForConn: new Map([["c1", "hub:u-1"]]),
@@ -129,6 +147,7 @@ test("a live peer with a grant and a known binding merges into ONE online contac
 test("a live peer WITHOUT a grant keeps its hub-session row, separate from contacts", () => {
   const { rows, pairedKeys } = buildHubRows({
     contacts: CONTACTS,
+    history: HISTORY,
     peers: [PEER({ conn_id: "c9", name: "Firefox de estudio" })],
     pairedConnIds: new Set(),
     contactForConn: new Map(),
@@ -143,6 +162,7 @@ test("a live peer WITHOUT a grant keeps its hub-session row, separate from conta
 test("a paired peer with NO known binding stays a hub-session row but is tagged paired", () => {
   const { rows, pairedKeys } = buildHubRows({
     contacts: CONTACTS,
+    history: HISTORY,
     peers: [PEER()],
     pairedConnIds: new Set(["c1"]),
     contactForConn: new Map(),
@@ -155,6 +175,7 @@ test("a paired peer with NO known binding stays a hub-session row but is tagged 
 test("unpaired peers never steal a contact binding even if the map has their conn", () => {
   const { rows } = buildHubRows({
     contacts: CONTACTS,
+    history: HISTORY,
     peers: [PEER({ conn_id: "c1" })],
     pairedConnIds: new Set(),
     contactForConn: new Map([["c1", "hub:u-1"]]),
@@ -166,11 +187,67 @@ test("unpaired peers never steal a contact binding even if the map has their con
 test("contact keys are the history keys, so DeviceList previews resolve from history", () => {
   const { rows } = buildHubRows({
     contacts: CONTACTS,
+    history: HISTORY,
     peers: [PEER()],
     pairedConnIds: new Set(["c1"]),
     contactForConn: new Map([["c1", "hub:u-1"]]),
   });
   assert.ok(rows.every((r) => isContactKey(r.key) || r.key.startsWith("hub-session:")));
+});
+
+// ── Dead-row pruning: empty+offline stored contacts are hidden entirely ──────
+
+test("an empty offline stored contact is hidden entirely (dead row, user rule)", () => {
+  const { rows, pairedKeys } = buildHubRows({
+    contacts: { "hub:dead": "Fila muerta" },
+    history: {},
+    peers: [],
+    pairedConnIds: new Set(),
+    contactForConn: new Map(),
+  });
+  assert.equal(rows.filter((r) => r.key === "hub:dead").length, 0);
+  assert.equal(pairedKeys.size, 0);
+});
+
+test("an empty but online-bound contact stays visible (fresh pair)", () => {
+  const { rows, pairedKeys } = buildHubRows({
+    contacts: { "hub:u-new": "Navegador recién vinculado" },
+    history: {},
+    peers: [PEER()],
+    pairedConnIds: new Set(["c1"]),
+    contactForConn: new Map([["c1", "hub:u-new"]]),
+  });
+  const row = rows.find((r) => r.key === "hub:u-new");
+  assert.ok(row, "a fresh pair must render ONE online contact row");
+  assert.equal(row!.online, true);
+  assert.ok(pairedKeys.has("hub:u-new"));
+});
+
+test("a contact with messages stays visible even offline", () => {
+  const { rows } = buildHubRows({
+    contacts: { "hub:u-old": "Conversación vieja" },
+    history: { "hub:u-old": [ENTRY("m1", true, "hola")] },
+    peers: [],
+    pairedConnIds: new Set(),
+    contactForConn: new Map(),
+  });
+  const row = rows.find((r) => r.key === "hub:u-old");
+  assert.ok(row, "a with-messages contact renders offline");
+  assert.equal(row!.online, false);
+});
+
+test("live presence rows survive even when every stored contact is pruned", () => {
+  // Device list rule: real conversations OR live things. Presence-only
+  // sessions are live things and must never be pruned by the contact filter.
+  const { rows } = buildHubRows({
+    contacts: { "hub:dead": "Fila muerta" },
+    history: {},
+    peers: [PEER({ conn_id: "c9", name: "Firefox de estudio" })],
+    pairedConnIds: new Set(),
+    contactForConn: new Map(),
+  });
+  assert.equal(rows.filter((r) => r.key === "hub-session:c9").length, 1);
+  assert.equal(rows.filter((r) => r.key === "hub:dead").length, 0);
 });
 
 // ── Binding learning: unique non-empty name match only (display grouping) ───
@@ -200,6 +277,7 @@ test("a freshly paired conn with no message yet is the reload signal for its con
   assert.deepEqual(fresh, ["c1"]);
   const { rows, pairedKeys } = buildHubRows({
     contacts: { "hub:u-1": "Navegador de salón" },
+    history: {},
     peers: [PEER()],
     pairedConnIds: new Set(["c1"]),
     contactForConn: new Map(),
@@ -317,6 +395,10 @@ test("a learned minted binding merges a paired session into its contact row desp
   const contacts = { "hub:a": "e2e-chat-A", "hub:b": "e2e-chat-A" };
   const { rows, pairedKeys } = buildHubRows({
     contacts,
+    history: {
+      "hub:a": [ENTRY("ma", true, "1")],
+      "hub:b": [ENTRY("mb", true, "2")],
+    },
     peers: [PEER({ conn_id: "c1", name: "e2e-chat-A" })],
     pairedConnIds: new Set(["c1"]),
     contactForConn: new Map([["c1", "hub:b"]]),
@@ -392,4 +474,24 @@ test("hubFileErrorNotice builds the honest persisted system copy", () => {
     hubFileErrorNotice("doc.pdf", "algo-raro"),
     "No se pudo recibir doc.pdf: error desconocido",
   );
+});
+
+// ── Sidebar delete affordance gating ────────────────────────────────────────
+
+test("canDeleteRow: only rows with existing history get the delete X", () => {
+  const history = {
+    "lan:macbook": [
+      { id: "e1", mine: true, text: "hola", at: 1 },
+      { id: "e2", mine: false, text: "chau", at: 2 },
+    ],
+    "hub:u-1": [{ id: "e3", mine: false, text: "📎 foto.png", at: 3 }],
+    "hub:empty-contact": [],
+  };
+  // Rows with at least one entry: deletable.
+  assert.equal(canDeleteRow(history, "lan:macbook"), true);
+  assert.equal(canDeleteRow(history, "hub:u-1"), true);
+  // Never-chatted device (no key in history): no X.
+  assert.equal(canDeleteRow(history, "lan:never-chatted"), false);
+  // Empty-entry row (e.g. just-deleted conversation): no X.
+  assert.equal(canDeleteRow(history, "hub:empty-contact"), false);
 });

@@ -5,19 +5,26 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { DeviceList } from "./components/DeviceList";
 import { Conversation } from "./components/Conversation";
 import { HubPairingRequests } from "./components/HubPairingRequests";
+import { ClipboardPicker } from "./components/ClipboardPicker";
+import { Toast, type ToastState } from "./components/Toast";
 import { Avatar } from "./components/Avatar";
 import {
   demoRequested,
   discover,
   getDownloadFolder,
   getPinFor,
+  lanSendClipboard,
+  onLanClipboardReceived,
   hubCancelPairing,
   hubPairing,
   hubPresence,
+  hubSendClipboard,
   hubSendFile,
   hubSendText,
   hubStatus,
   isTauri,
+  onClipboardShortcut,
+  onHubClipboardReceived,
   onHubFile,
   onHubFileError,
   onHubMessage,
@@ -27,6 +34,7 @@ import {
   onPairDone,
   onPairRequest,
   pairVerify,
+  readClipboard,
   sendPairRequest,
   onFile,
   onMessage,
@@ -38,6 +46,7 @@ import {
   sendText,
   setDownloadFolder as persistDownloadFolder,
   setPinFor,
+  writeClipboard,
   type RawDevice,
 } from "./lib/backend";
 import { DEMO_DEVICES, demoHistory, runDemoSim } from "./lib/demo";
@@ -76,6 +85,17 @@ import {
   planHubInbound,
   routeSend,
 } from "./lib/hub-chat-core";
+import {
+  CLIP_EMPTY_OR_LONG,
+  SEND_UNKNOWN,
+  WRITE_COPY_FAILED,
+  planClipboardResolve,
+  planClipboardSend,
+  planHubClipboardInbound,
+  planLanClipboardReceived,
+  resolveTarget,
+  type ClipboardTargetOption,
+} from "./lib/clipboard-core";
 import {
   HUB_PEER_PREVIEW,
   hubConnIdFromKey,
@@ -193,6 +213,11 @@ export default function App() {
   // sesión actual del hub. Sin DB, sin localStorage: muere con la app.
   const [hubPairingState, setHubPairingState] =
     useState<HubPairingSnapshot>(EMPTY_PAIRING);
+  // Toast efímero del portapapeles (cola de uno) y overlay de destino.
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [pickerOptions, setPickerOptions] = useState<ClipboardTargetOption[] | null>(
+    null,
+  );
   // Último nombre visto por conexión: para que el detalle de un par que se fue
   // siga diciendo quién era en vez de volver a "Navegador". Solo memoria.
   const hubNamesRef = useRef<Map<string, string>>(new Map());
@@ -211,6 +236,7 @@ export default function App() {
   const hubContactsRef = useRef<Record<string, string>>({});
   const onlineRef = useRef<Map<string, boolean>>(new Map());
   const retryRef = useRef<(key: string, id: string) => void>(() => {});
+  const toastTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     devicesRef.current = devices;
@@ -377,6 +403,55 @@ export default function App() {
       persistPatch(key, id, state);
     },
     [persistPatch],
+  );
+
+  // Toast efímero: cola de uno, el nuevo reemplaza al anterior y re-arma el
+  // temporizador de 2.5s.
+  const showToast = useCallback((text: string) => {
+    setToast({ id: Date.now(), text });
+    window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  // Portapapeles → contacto del hub o dispositivo LAN: lectura local
+  // (Err = vacío o pasado el tope nativo), entrada optimista persistida como
+  // cualquier mensaje propio y envío con acuse acotado; cada error parchea y
+  // explica con su toast. La ruta sale de la opción resuelta (hub | lan).
+  const sendClipboardTo = useCallback(
+    async (key: string, name: string, route: "hub" | "lan" = "hub") => {
+      let text: string;
+      try {
+        text = await readClipboard();
+      } catch {
+        showToast(CLIP_EMPTY_OR_LONG);
+        return;
+      }
+      const id = crypto.randomUUID();
+      pushEntry(key, { mine: true, text }, id);
+      if (route === "lan") {
+        const device = devicesRef.current.find((d) => d.key === key);
+        try {
+          if (!device?.ip) throw new Error("sin-ip");
+          await lanSendClipboard(device.ip, getPinFor(key), id, text);
+          patchEntry(key, id, "sent");
+          showToast(`Enviado a ${name}`);
+        } catch (e) {
+          if (String(e).includes("PIN_REQUERIDO")) setPendingPin(key);
+          else showToast(SEND_UNKNOWN);
+          patchEntry(key, id, "failed");
+        }
+        return;
+      }
+      try {
+        await hubSendClipboard(key, id, text);
+        patchEntry(key, id, "sent");
+        showToast(`Enviado a ${name}`);
+      } catch (e) {
+        patchEntry(key, id, "failed");
+        showToast(planClipboardSend({ ok: false, error: String(e) }, name).toast);
+      }
+    },
+    [pushEntry, patchEntry, showToast],
   );
 
   // Avisa al otro dispositivo que sus mensajes fueron vistos (palomitas azules).
@@ -690,6 +765,33 @@ export default function App() {
       if (cancelled) fn();
       else offs.push(fn);
     });
+    // Portapapeles entrante: la fila ya fue persistida nativamente ANTES del
+    // evento (persist:false), se copia al portapapeles local y se avisa de
+    // quién vino. Si la copia falla, el mensaje queda tap-to-copy y el toast
+    // lo dice sin mentir.
+    onHubClipboardReceived((raw) => {
+      const plan = planHubClipboardInbound(raw);
+      if (!plan) return;
+      pushEntry(plan.msg.key, { mine: false, text: plan.msg.text }, plan.msg.id, {
+        persist: false,
+      });
+      void writeClipboard(plan.msg.text).catch(() => showToast(WRITE_COPY_FAILED));
+      showToast(plan.toastCopy);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else offs.push(fn);
+    });
+    // Portapapeles LAN entrante: SOLO el toast — la fila la agrega
+    // message-received (mismo sobre que un texto) y la copia local ya la
+    // hizo el nativo. append:false del plan evita la fila duplicada.
+    onLanClipboardReceived((raw) => {
+      const plan = planLanClipboardReceived(raw);
+      if (!plan) return;
+      showToast(plan.toast);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else offs.push(fn);
+    });
     // Recepción fallida: fila de sistema persistida con causa honesta.
     onHubFileError((err) => {
       if (!isContactKey(err.key)) return;
@@ -705,7 +807,7 @@ export default function App() {
       cancelled = true;
       offs.forEach((fn) => fn());
     };
-  }, [pushEntry]);
+  }, [pushEntry, showToast]);
 
   const sorted = useMemo(() => {
     const activity = (k: string) => history[k]?.[history[k].length - 1]?.at ?? 0;
@@ -765,13 +867,54 @@ export default function App() {
     () =>
       buildHubRows({
         contacts: hubContacts,
+        history,
         peers: hubPeers,
         pairedConnIds: hubPairedIds,
         contactForConn,
       }),
-    [hubContacts, hubPeers, hubPairedIds, contactForConn],
+    [history, hubContacts, hubPeers, hubPairedIds, contactForConn],
   );
   const listDevices = useMemo(() => mergeDevices(sorted, hubRows.rows), [sorted, hubRows.rows]);
+  // Snapshot vivo de las filas del hub: el atajo global resuelve el destino
+  // con el emparejamiento y la presencia DEL MOMENTO, sin re-registrarse en
+  // cada cambio de presencia.
+  const hubRowsRef = useRef(hubRows);
+  useEffect(() => {
+    hubRowsRef.current = hubRows;
+  }, [hubRows]);
+
+  // Atajo global Cmd+Shift+V: destino único → enviar directo; varios online →
+  // overlay de elección; nadie → toast honesto. En demo no se escucha nada.
+  useEffect(() => {
+    if (DEMO) return;
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    onClipboardShortcut(() => {
+      const contacts = hubRowsRef.current.rows.filter((c) => isContactKey(c.key));
+      const onlineKeys = new Set(contacts.filter((c) => c.online).map((c) => c.key));
+      const lanDevices = devicesRef.current.map((d) => ({
+        key: d.key,
+        name: d.name,
+        online: d.online,
+        hasPin: !!getPinFor(d.key),
+      }));
+      const target = resolveTarget(contacts, onlineKeys, lanDevices);
+      if (target.kind === "none") {
+        showToast(planClipboardResolve(target) ?? "");
+        return;
+      }
+      if (target.kind === "single") {
+        void sendClipboardTo(target.key, target.name, target.route);
+      } else setPickerOptions(target.options);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else un = fn;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [sendClipboardTo, showToast]);
   // Carriles separados: si hay un modal LAN abierto (PIN o solicitud), las
   // tarjetas del hub se difieren; el estado del backend sigue vivo y vuelven
   // al cerrarse. Nunca dos overlays encima ni bloqueos cruzados.
@@ -1135,6 +1278,7 @@ export default function App() {
           downloadFolder={downloadFolder}
           onRegeneratePin={regeneratePin}
           onDeleteAll={deleteAll}
+          onDeleteConversation={deleteConversation}
         />
         {selectedHubKey ? (
           <HubPeerDetail
@@ -1246,6 +1390,18 @@ export default function App() {
             <p className="pin-hint">El código vence en 2 minutos.</p>
           </div>
         </div>
+      )}
+
+      <Toast toast={toast} />
+      {pickerOptions && (
+        <ClipboardPicker
+          options={pickerOptions}
+          onPick={(o) => {
+            setPickerOptions(null);
+            void sendClipboardTo(o.key, o.name, o.route);
+          }}
+          onClose={() => setPickerOptions(null)}
+        />
       )}
 
       <HubPairingRequests

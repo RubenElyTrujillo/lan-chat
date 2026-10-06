@@ -1,4 +1,5 @@
 // LAN-Chat — motor: descubrimiento mDNS, transferencia de texto y archivos por TCP local.
+pub mod clipboard;
 pub mod history;
 pub mod hub;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -156,6 +157,44 @@ async fn send_text(ip: String, pin: String, texto: String, id: String) -> Result
         .map_err(|e| format!("No se pudo enviar: {e}"))?;
 
     Ok(wait_delivery_ack(&mut stream)?)
+}
+
+/// Frame de salida para el portapapeles por LAN: mismo sobre que `text`,
+/// con `kind: "clipboard"` para que el receptor lo distinga.
+fn clipboard_wire_payload(pin: &str, id: &str, from: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "clipboard",
+        "id": id,
+        "from": from,
+        "pin": pin,
+        "text": text
+    })
+}
+
+/// Envía el portapapeles a un dispositivo LAN pin-eado: mismas puertas y
+/// acuse que `send_text`, con `kind: "clipboard"`. El texto pasa por el
+/// mismo tope nativo (64_000 chars). Ok siempre responde "sent" para que el
+/// frontend trate ambas rutas igual; los Err pasan honestos (incluye
+/// "PIN_REQUERIDO" si el receptor rechazó por pin).
+#[tauri::command]
+async fn lan_send_clipboard(
+    ip: String,
+    pin: String,
+    id: String,
+    texto: String,
+) -> Result<String, String> {
+    use std::io::Write;
+
+    let texto = clipboard::bound_clipboard_text(&texto)?;
+    let payload = clipboard_wire_payload(&pin, &id, &device_name(), &texto);
+
+    let mut stream = std::net::TcpStream::connect((ip.as_str(), 8787))
+        .map_err(|e| format!("No se pudo conectar: {e}"))?;
+    stream
+        .write_all(format!("{payload}\n").as_bytes())
+        .map_err(|e| format!("No se pudo enviar: {e}"))?;
+
+    Ok(wait_delivery_ack(&mut stream).map(|_| "sent".to_string())?)
 }
 
 /// Espera (con timeout) el acuse del receptor en el mismo socket.
@@ -407,6 +446,47 @@ mod tests {
             load.contacts.get("hub:u-2").map(String::as_str),
             Some("Beto")
         );
+    }
+
+    #[test]
+    fn clipboard_wire_frame_carries_kind_pin_id_and_text() {
+        let payload = clipboard_wire_payload("4321", "id-1", "Emisor", "hola");
+        assert_eq!(payload["kind"], "clipboard");
+        assert_eq!(payload["pin"], "4321", "el pin pasa tal cual al wire");
+        assert_eq!(payload["id"], "id-1");
+        assert_eq!(payload["from"], "Emisor");
+        assert_eq!(payload["text"], "hola");
+    }
+
+    #[tokio::test]
+    async fn lan_send_clipboard_rejects_out_of_bound_text_before_connecting() {
+        let over = "x".repeat(clipboard::MAX_CLIPBOARD_TEXT + 1);
+        let err = lan_send_clipboard("127.0.0.1".into(), "1234".into(), "id-1".into(), over).await;
+        assert_eq!(err, Err("invalid-text".to_string()));
+        let blank = lan_send_clipboard(
+            "127.0.0.1".into(),
+            "1234".into(),
+            "id-1".into(),
+            "  \n ".into(),
+        )
+        .await;
+        assert_eq!(blank, Err("invalid-text".to_string()));
+    }
+
+    #[test]
+    fn ingest_lan_clipboard_emits_history_and_notify_and_writes_once() {
+        let writes: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let (msg, notify) = ingest_lan_clipboard("Beto", "hola lan", |t| {
+            writes.borrow_mut().push(t.to_string());
+        });
+        assert_eq!(msg.from, "Beto");
+        assert_eq!(msg.text, "hola lan");
+        assert_eq!(msg.id, "", "el id del wire lo agrega el caller");
+        assert_eq!(
+            notify,
+            serde_json::json!({ "from": "Beto", "text": "hola lan" })
+        );
+        assert_eq!(*writes.borrow(), vec!["hola lan".to_string()]);
     }
 }
 
@@ -759,6 +839,58 @@ async fn hub_send_text(
     state.hub.send_text_to_contact(&key, &id, &text).await
 }
 
+/// Envía el portapapeles a un contacto del hub: mismas puertas y cola de
+/// entrega que `hub_send_text`, con payload de tipo `clipboard`.
+#[tauri::command]
+async fn hub_send_clipboard(
+    state: tauri::State<'_, Arc<AppState>>,
+    key: String,
+    id: String,
+    text: String,
+) -> Result<String, String> {
+    state.hub.send_clipboard_to_contact(&key, &id, &text).await
+}
+
+/// Lee el texto del portapapeles del sistema con los límites compartidos:
+/// trim, vacío rechazado, >64_000 chars rechazado. Solo texto plano.
+#[tauri::command]
+fn read_clipboard(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let raw = app.clipboard().read_text().map_err(|e| e.to_string())?;
+    clipboard::bound_clipboard_text(&raw)
+}
+
+/// Escribe texto plano en el portapapeles del sistema con los mismos
+/// límites que la lectura.
+#[tauri::command]
+fn write_clipboard(app: tauri::AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let text = clipboard::bound_clipboard_text(&text)?;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// Portapapeles entrante por LAN: misma fila de historial que un texto (el
+/// caller emite `message-received` con el mensaje devuelto y el id del wire)
+/// MÁS la copia local vía el seam `write` y el payload de
+/// `lan-clipboard-received` para el toast del frontend. La entrada la agrega
+/// SOLO message-received; el evento lan es solo aviso (append:false).
+/// Fallo de copia es log-only: el mensaje queda tocable.
+fn ingest_lan_clipboard<F: FnMut(&str)>(
+    from: &str,
+    text: &str,
+    mut write: F,
+) -> (ChatMessage, serde_json::Value) {
+    write(text);
+    (
+        ChatMessage {
+            from: from.to_string(),
+            text: text.to_string(),
+            id: String::new(),
+        },
+        serde_json::json!({ "from": from, "text": text }),
+    )
+}
+
 /// Envía un archivo a un contacto del hub vía relay (base64, acote de
 /// entrega acotado). Sin cola ni reintento: si falla, el frontend es dueño.
 #[tauri::command]
@@ -988,7 +1120,7 @@ async fn serve_file(
     }
 }
 
-async fn api_devices(AxState(state): AxState<Arc<AppState>>) -> impl IntoResponse {
+async fn api_devices(AxState(_state): AxState<Arc<AppState>>) -> impl IntoResponse {
     let local_ip = std::net::UdpSocket::bind("0.0.0.0:0")
         .ok()
         .and_then(|s| {
@@ -1058,6 +1190,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // Carpeta de descargas por defecto: ~/Downloads/lan-chat
             let default_dir = app
@@ -1145,6 +1278,32 @@ pub fn run() {
             });
             app.manage(settings.clone());
 
+            // Atajo global Cmd/Ctrl+Shift+V: pide al frontend compartir el
+            // portapapeles vía `clipboard-send-requested`. Un fallo de
+            // registro (OS lo niega, ya tomado por otra app) es solo log:
+            // la app arranca igual sin el atajo.
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                const CLIPBOARD_SHORTCUT: &str = "CmdOrCtrl+Shift+V";
+                app.handle()
+                    .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+                let gs = app.global_shortcut();
+                if !gs.is_registered(CLIPBOARD_SHORTCUT) {
+                    if let Err(e) = gs.on_shortcut(CLIPBOARD_SHORTCUT, |app, _shortcut, event| {
+                        if clipboard::clipboard_event_should_emit(event.state) {
+                            let _ = app.emit("clipboard-send-requested", serde_json::json!({}));
+                        }
+                    }) {
+                        eprintln!(
+                            "Atajo global {CLIPBOARD_SHORTCUT} no registrado (no fatal): {e}"
+                        );
+                    }
+                } else {
+                    eprintln!("Atajo global {CLIPBOARD_SHORTCUT} ya registrado; se omite");
+                }
+            }
+
             // Seams del hub: acceso corto a la DB, emisión de mensajes
             // aceptados y persistencia de contactos. Instalados UNA vez,
             // ANTES de arrancar el loop del cliente, así ningún frame se
@@ -1164,6 +1323,12 @@ pub fn run() {
                     let app = app.handle().clone();
                     Arc::new(move |msg: &hub::inbox::ReceivedChat| {
                         let _ = app.emit("hub-message-received", msg.clone());
+                    })
+                },
+                clipboard_emit: {
+                    let app = app.handle().clone();
+                    Arc::new(move |msg: &hub::inbox::ReceivedClipboard| {
+                        let _ = app.emit("hub-clipboard-received", msg.clone());
                     })
                 },
                 contact_persist: {
@@ -1303,7 +1468,9 @@ pub fn run() {
                         let kind = parsed["kind"].as_str().unwrap_or("text").to_string();
                         let sent_pin = parsed["pin"].as_str().unwrap_or("");
                         let own_pin = settings.own_pin.lock().unwrap().clone();
-                        if (kind == "text" || kind == "file") && sent_pin != own_pin {
+                        if (kind == "text" || kind == "file" || kind == "clipboard")
+                            && sent_pin != own_pin
+                        {
                             println!("⚠️ Conexión rechazada por PIN (de {from})");
                             let _ = reader
                                 .get_ref()
@@ -1392,6 +1559,34 @@ pub fn run() {
                                     eprintln!("Transferencia incompleta: {}", dest.display());
                                     let _ = std::fs::remove_file(&dest);
                                 }
+                            }
+                            "clipboard" => {
+                                let text = parsed["text"].as_str().unwrap_or("").to_string();
+                                let (msg, notify) = ingest_lan_clipboard(&from, &text, |t| {
+                                    // Copia local: write_clipboard ya acota y
+                                    // rechaza texto inválido; falla log-only.
+                                    if let Err(e) = write_clipboard(handle.clone(), t.to_string())
+                                    {
+                                        eprintln!("No se pudo copiar el portapapeles LAN: {e}");
+                                    }
+                                });
+                                println!("{} compartió portapapeles", msg.from);
+                                let _ = handle.emit(
+                                    "message-received",
+                                    ChatMessage {
+                                        from: msg.from,
+                                        text: msg.text,
+                                        id: id.clone(),
+                                    },
+                                );
+                                if !id.is_empty() {
+                                    let payload =
+                                        serde_json::json!({ "kind": "ack", "id": id.clone() });
+                                    let _ = reader
+                                        .get_ref()
+                                        .write_all(format!("{payload}\n").as_bytes());
+                                }
+                                let _ = handle.emit("lan-clipboard-received", notify);
                             }
                             "read-ack" => {
                                 let ids: Vec<String> = parsed["ids"]
@@ -1494,6 +1689,7 @@ pub fn run() {
             discover_devices,
             send_text,
             send_file,
+            lan_send_clipboard,
             send_ack,
             probe_port,
             get_download_folder,
@@ -1513,7 +1709,10 @@ pub fn run() {
             hub_pairing,
             hub_cancel_pairing,
             hub_send_text,
-            hub_send_file
+            hub_send_file,
+            hub_send_clipboard,
+            read_clipboard,
+            write_clipboard
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

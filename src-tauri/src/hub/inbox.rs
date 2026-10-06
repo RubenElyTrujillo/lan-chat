@@ -171,6 +171,101 @@ pub fn handle_chat_frame(
     }
 }
 
+// ---- Clipboard (shared clipboard over the hub) ----
+
+/// Persisted + emitted clipboard share (the `hub-clipboard-received`
+/// payload). Same shape as `ReceivedChat`; the frontend owns the single
+/// clipboard entry rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReceivedClipboard {
+    pub key: String,
+    pub name: String,
+    pub text: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardOutcome {
+    /// Persisted (and emitted): the row was committed before the hook ran.
+    Accepted(ReceivedClipboard),
+    /// Same id + same content already stored: no second row, no event.
+    Duplicate,
+    /// Same id with different content or under another key: rejected.
+    Conflict,
+    /// Dropped without any side effect; the string is the log reason.
+    Dropped(&'static str),
+}
+
+/// Payload-level parse: `{type:"clipboard", text:<string>, id?:<string>}`.
+/// Same id rules as chat; the text bound is the clipboard one (chars).
+pub fn parse_clipboard(payload: &serde_json::Value) -> Option<ParsedChat> {
+    if payload.get("type")?.as_str()? != "clipboard" {
+        return None;
+    }
+    let text = payload.get("text")?.as_str()?;
+    let count = text.chars().count();
+    if count == 0 || count > crate::clipboard::MAX_CLIPBOARD_TEXT {
+        return None;
+    }
+    let id = match payload.get("id").and_then(serde_json::Value::as_str) {
+        Some(id) if !id.is_empty() && id.len() <= MAX_MSG_ID_LEN => Some(id.to_string()),
+        _ => None,
+    };
+    Some(ParsedChat {
+        text: text.to_string(),
+        id,
+    })
+}
+
+/// Authorizes, persists and (on `New` only) emits one inbound clipboard
+/// frame — the clipboard twin of `handle_chat_frame`: SAME authorization
+/// gates and SAME `accept_text` persist path (a normal text row), but a
+/// 64_000-char text bound and its own emit hook. Duplicates stay silent.
+pub fn handle_clipboard_frame(
+    from_sid: Option<&str>,
+    payload: &serde_json::Value,
+    ctx: ChatContext,
+    mint: &dyn Fn() -> Result<String, String>,
+    now: i64,
+    conn: &mut Connection,
+    emit: &dyn Fn(&ReceivedClipboard, &Connection),
+) -> ClipboardOutcome {
+    // Authorization gate: identical to chat, fail closed.
+    let (peer, key) = match authorize(ctx, from_sid) {
+        Ok(ok) => ok,
+        Err(reason) => return ClipboardOutcome::Dropped(reason),
+    };
+    // Payload gate: only bounded clipboard payloads are accepted.
+    let Some(parsed) = parse_clipboard(payload) else {
+        return ClipboardOutcome::Dropped("not a clipboard payload");
+    };
+    // The wire id is reused only when valid; anything else is minted here.
+    let id = match parsed.id {
+        Some(id) => id,
+        None => match mint() {
+            Ok(id) => id,
+            Err(_) => return ClipboardOutcome::Dropped("id mint failed"),
+        },
+    };
+    let hash = sha256_hex(&parsed.text);
+    match crate::history::accept_text(conn, &key, &id, &parsed.text, now, Some(&hash)) {
+        Ok(crate::history::Accept::New) => {
+            let msg = ReceivedClipboard {
+                key,
+                name: peer.name,
+                text: parsed.text,
+                id,
+            };
+            // Persist-before-emit: the row is already committed (accept_text
+            // owns its transaction), so the hook can prove visibility.
+            emit(&msg, conn);
+            ClipboardOutcome::Accepted(msg)
+        }
+        Ok(crate::history::Accept::Duplicate) => ClipboardOutcome::Duplicate,
+        Err(_) => ClipboardOutcome::Conflict,
+    }
+}
+
 // ---- Files (Slice 5a): inbound staging pipeline ----
 
 /// Persisted + emitted received file (the `hub-file-received` payload).
@@ -491,8 +586,9 @@ pub fn handle_file_frame(
     emit: &dyn Fn(&ReceivedFile, &Connection),
     on_error: &dyn Fn(&FileError),
 ) -> FileOutcome {
-    // Authorization gate: identical to chat, fail closed.
-    let (peer, key) = match authorize(ctx, from_sid) {
+    // Authorization gate: identical to chat, fail closed. The peer display
+    // name lives in the payload; authorization itself only needs the key.
+    let (_, key) = match authorize(ctx, from_sid) {
         Ok(ok) => ok,
         Err(reason) => return FileOutcome::Dropped(reason),
     };
@@ -918,6 +1014,148 @@ mod tests {
         assert_eq!(mine, 0);
         assert_eq!(state, None);
         assert_eq!(hash, Some(sha256_hex("hola")));
+    }
+
+    // ---- Clipboard ----
+
+    fn clipboard_payload(text: &str, id: &str) -> serde_json::Value {
+        serde_json::json!({ "type": "clipboard", "text": text, "id": id })
+    }
+
+    fn clipboard_ok(
+        payload: &serde_json::Value,
+        ctx: ChatContext,
+        conn: &mut Connection,
+    ) -> (ClipboardOutcome, Vec<ReceivedClipboard>) {
+        let mint = counter_mint("cmint");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let emit = |msg: &ReceivedClipboard, _c: &Connection| {
+            seen.borrow_mut().push(msg.clone());
+        };
+        let outcome = handle_clipboard_frame(OK_SID, payload, ctx, &mint, 1_000, conn, &emit);
+        (outcome, seen.into_inner())
+    }
+
+    #[test]
+    fn parse_clipboard_accepts_valid_payload_and_validates_fields() {
+        let parsed = parse_clipboard(&clipboard_payload("hola", "c-1")).unwrap();
+        assert_eq!(parsed.text, "hola");
+        assert_eq!(parsed.id.as_deref(), Some("c-1"));
+        assert!(parse_clipboard(&serde_json::json!({ "type": "chat", "text": "x" })).is_none());
+        assert!(parse_clipboard(&serde_json::json!({ "type": "clipboard" })).is_none());
+        assert!(parse_clipboard(&serde_json::json!({ "type": "clipboard", "text": 42 })).is_none());
+        assert_eq!(
+            parse_clipboard(&clipboard_payload("x", "")).unwrap().id,
+            None
+        );
+    }
+
+    #[test]
+    fn parse_clipboard_bounds_text_in_chars() {
+        let exact = "é".repeat(crate::clipboard::MAX_CLIPBOARD_TEXT);
+        assert!(parse_clipboard(&clipboard_payload(&exact, "c")).is_some());
+        let over = "é".repeat(crate::clipboard::MAX_CLIPBOARD_TEXT + 1);
+        assert!(parse_clipboard(&clipboard_payload(&over, "c")).is_none());
+        assert!(parse_clipboard(&clipboard_payload("", "c")).is_none());
+    }
+
+    #[test]
+    fn unauthorized_clipboard_is_dropped_without_row_or_event() {
+        let mut conn = temp_db("clip-no-grant");
+        let (outcome, seen) = clipboard_ok(
+            &clipboard_payload("hola", "c-1"),
+            ctx(Some(web_peer()), false, Some("hub:k1")),
+            &mut conn,
+        );
+        assert!(matches!(outcome, ClipboardOutcome::Dropped(_)));
+        assert!(seen.is_empty());
+        assert_eq!(row_count(&conn, "c-1"), 0);
+    }
+
+    #[test]
+    fn authorized_clipboard_persists_normal_text_row_and_emits() {
+        let mut conn = temp_db("clip-happy");
+        let (outcome, seen) = clipboard_ok(
+            &clipboard_payload("contenido", "c-1"),
+            ctx(Some(web_peer()), true, Some("hub:k1")),
+            &mut conn,
+        );
+        let ClipboardOutcome::Accepted(msg) = outcome else {
+            panic!("expected Accepted, got {outcome:?}");
+        };
+        assert_eq!(msg.key, "hub:k1");
+        assert_eq!(msg.name, "Ana");
+        assert_eq!(msg.text, "contenido");
+        assert_eq!(msg.id, "c-1");
+        assert_eq!(seen, vec![msg.clone()]);
+        // Persist-before-emit + row shape: a NORMAL text row (mine=0,
+        // NULL state, text hash) exactly like inbound chat.
+        assert_eq!(row_count(&conn, "c-1"), 1);
+        let (text, mine, state, hash): (String, i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT text, mine, state, content_hash FROM messages WHERE id = 'c-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(text, "contenido");
+        assert_eq!(mine, 0);
+        assert_eq!(state, None);
+        assert_eq!(hash, Some(sha256_hex("contenido")));
+    }
+
+    #[test]
+    fn duplicate_clipboard_is_silent_no_second_row() {
+        let mut conn = temp_db("clip-dup");
+        let frame = clipboard_payload("hola", "c-1");
+        let (first, seen1) = clipboard_ok(
+            &frame,
+            ctx(Some(web_peer()), true, Some("hub:k1")),
+            &mut conn,
+        );
+        assert!(matches!(first, ClipboardOutcome::Accepted(_)));
+        assert_eq!(seen1.len(), 1);
+        let (second, seen2) = clipboard_ok(
+            &frame,
+            ctx(Some(web_peer()), true, Some("hub:k1")),
+            &mut conn,
+        );
+        assert_eq!(second, ClipboardOutcome::Duplicate);
+        assert!(seen2.is_empty(), "duplicates never emit");
+        assert_eq!(row_count(&conn, "c-1"), 1);
+    }
+
+    #[test]
+    fn oversized_clipboard_is_dropped_without_row() {
+        let over = "x".repeat(crate::clipboard::MAX_CLIPBOARD_TEXT + 1);
+        let mut conn = temp_db("clip-over");
+        let (outcome, seen) = clipboard_ok(
+            &clipboard_payload(&over, "c-big"),
+            ctx(Some(web_peer()), true, Some("hub:k1")),
+            &mut conn,
+        );
+        assert!(matches!(outcome, ClipboardOutcome::Dropped(_)));
+        assert!(seen.is_empty());
+        assert_eq!(row_count(&conn, "c-big"), 0);
+    }
+
+    #[test]
+    fn conflicting_clipboard_id_is_rejected() {
+        let mut conn = temp_db("clip-conflict");
+        let (first, _) = clipboard_ok(
+            &clipboard_payload("hola", "c-1"),
+            ctx(Some(web_peer()), true, Some("hub:k1")),
+            &mut conn,
+        );
+        assert!(matches!(first, ClipboardOutcome::Accepted(_)));
+        let (second, seen2) = clipboard_ok(
+            &clipboard_payload("OTRA", "c-1"),
+            ctx(Some(web_peer()), true, Some("hub:k1")),
+            &mut conn,
+        );
+        assert_eq!(second, ClipboardOutcome::Conflict);
+        assert!(seen2.is_empty());
+        assert_eq!(row_count(&conn, "c-1"), 1);
     }
 
     // ---- Files (Slice 5a) ----
@@ -1434,7 +1672,7 @@ mod tests {
     #[test]
     fn finalize_sanitizes_display_name_into_a_bare_file_name() {
         let dir = temp_dir("finalize-sanitize");
-        let mut conn = temp_db("file-finalize-sanitize");
+        let conn = temp_db("file-finalize-sanitize");
         let staged = stage_file(&dir, "f-1", b"hola").unwrap();
         insert_row(
             &conn,
@@ -1459,7 +1697,7 @@ mod tests {
     #[test]
     fn finalize_failure_keeps_row_pointing_at_valid_staged_file() {
         let dir = temp_dir("finalize-fail");
-        let mut conn = temp_db("file-finalize-fail");
+        let conn = temp_db("file-finalize-fail");
         let staged = stage_file(&dir, "f-1", b"hola").unwrap();
         insert_row(
             &conn,
@@ -1492,7 +1730,7 @@ mod tests {
     #[test]
     fn sweep_removes_only_unreferenced_stage_files() {
         let dir = temp_dir("sweep");
-        let mut conn = temp_db("file-sweep");
+        let conn = temp_db("file-sweep");
         fs::create_dir_all(dir.join(".hub-stage")).unwrap();
         let orphan = dir.join(".hub-stage").join("orphan.bin");
         let referenced = dir.join(".hub-stage").join("kept.bin");

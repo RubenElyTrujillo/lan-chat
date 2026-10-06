@@ -11,7 +11,7 @@ pub mod pairing;
 pub mod pairing_wire;
 pub mod presence;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,7 +20,9 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use self::client::HubClientConfig;
-use self::inbox::{sanitize_name, FileError, ReceivedChat, ReceivedFile, MAX_FILE_BYTES};
+use self::inbox::{
+    sanitize_name, FileError, ReceivedChat, ReceivedClipboard, ReceivedFile, MAX_FILE_BYTES,
+};
 use self::pairing_wire::PairingWire;
 use self::presence::HubPresenceSnapshot;
 
@@ -114,6 +116,10 @@ pub struct HubHooks {
     /// Emits an accepted inbound chat message (`hub-message-received`).
     /// Called strictly AFTER the row was committed.
     pub chat_emit: Arc<dyn Fn(&ReceivedChat) + Send + Sync>,
+    /// Emits an accepted inbound clipboard share (`hub-clipboard-received`).
+    /// Called strictly AFTER the row was committed; `chat_emit` is NEVER
+    /// fired for clipboard frames (the frontend renders one entry).
+    pub clipboard_emit: Arc<dyn Fn(&ReceivedClipboard) + Send + Sync>,
     /// Persists a minted contact key (`hub:<uuid>`) with the peer display
     /// name. Errors are logged non-fatally by the implementation.
     pub contact_persist: Arc<dyn Fn(&str, &str) + Send + Sync>,
@@ -433,39 +439,10 @@ impl HubShared {
         if text.is_empty() || text.len() > MAX_OUT_TEXT {
             return Err("invalid-text".to_string());
         }
-
-        // Session up + queue registered (two short locks, no await between).
-        let (connected, sender) = {
-            let rt = self.runtime.lock().unwrap();
-            let out = self.outbound.lock().ok().and_then(|o| o.clone());
-            (rt.connected, out)
-        };
-        if !connected {
-            return Err("hub-unavailable".to_string());
-        }
-        let Some(sender) = sender else {
-            return Err("hub-unavailable".to_string());
-        };
-
-        // Contact routing (short lock).
-        let Some(conn) = self.conn_for_contact(key) else {
-            return Err("pair-required".to_string());
-        };
-
-        // Presence gate (short lock).
-        let live = self.presence().peers.iter().any(|p| p.conn_id == conn);
-        if !live {
-            return Err("peer-offline".to_string());
-        }
-
-        // Fully serialized frame; enqueue + bounded ack. A closed queue or a
-        // failed/absent ack both mean the frame was NOT confirmed delivered.
-        let frame = serde_json::json!({
-            "type": "relay",
-            "to": conn,
-            "payload": { "type": "chat", "text": text, "kind": "app", "id": id },
+        let payload = serde_json::json!({
+            "type": "chat", "text": text, "kind": "app", "id": id,
         });
-        Self::await_delivery(sender, frame).await
+        self.send_payload_to_contact(key, payload).await
     }
 
     /// Sends one file to a paired contact through the CURRENT session's
@@ -529,6 +506,72 @@ impl HubShared {
                 "type": "file", "name": name, "data": data,
                 "size": bytes.len(), "kind": "app", "id": id
             },
+        });
+        Self::await_delivery(sender, frame).await
+    }
+
+    /// Sends one clipboard share to a paired contact through the CURRENT
+    /// session's outbound queue and awaits the bounded delivery ack. The
+    /// exact same gates and delivery tail as `send_text_to_contact`; only
+    /// the text bound (64_000 chars via `clipboard::bound_clipboard_text`)
+    /// and the wire payload type differ.
+    pub async fn send_clipboard_to_contact(
+        &self,
+        key: &str,
+        id: &str,
+        text: &str,
+    ) -> Result<String, String> {
+        // Local input validation first: garbage input never depends on the
+        // link state. The clipboard bound (64_000 chars) is wider than the
+        // chat one; the gate and error shape are identical.
+        let text = crate::clipboard::bound_clipboard_text(text)?;
+        let payload = serde_json::json!({
+            "type": "clipboard", "text": text, "kind": "app", "id": id,
+        });
+        self.send_payload_to_contact(key, payload).await
+    }
+
+    /// Shared delivery tail of every outbound app send (text, clipboard):
+    /// session up + queue registered (`hub-unavailable`) -> contact
+    /// resolves (`pair-required`) -> peer in presence (`peer-offline`) ->
+    /// serialize the caller's payload into a relay frame and await the
+    /// bounded ack. Locks are always short and never held across the ack
+    /// await. No replay or queue on failure: the frontend owns retry.
+    async fn send_payload_to_contact(
+        &self,
+        key: &str,
+        payload: serde_json::Value,
+    ) -> Result<String, String> {
+        // Session up + queue registered (two short locks, no await between).
+        let (connected, sender) = {
+            let rt = self.runtime.lock().unwrap();
+            let out = self.outbound.lock().ok().and_then(|o| o.clone());
+            (rt.connected, out)
+        };
+        if !connected {
+            return Err("hub-unavailable".to_string());
+        }
+        let Some(sender) = sender else {
+            return Err("hub-unavailable".to_string());
+        };
+
+        // Contact routing (short lock).
+        let Some(conn) = self.conn_for_contact(key) else {
+            return Err("pair-required".to_string());
+        };
+
+        // Presence gate (short lock).
+        let live = self.presence().peers.iter().any(|p| p.conn_id == conn);
+        if !live {
+            return Err("peer-offline".to_string());
+        }
+
+        // Fully serialized frame; enqueue + bounded ack. A closed queue or a
+        // failed/absent ack both mean the frame was NOT confirmed delivered.
+        let frame = serde_json::json!({
+            "type": "relay",
+            "to": conn,
+            "payload": payload,
         });
         Self::await_delivery(sender, frame).await
     }
@@ -940,6 +983,7 @@ mod tests {
         let installed = shared.set_hooks(HubHooks {
             with_db: Arc::new(|_: &mut dyn FnMut(&mut Connection)| {}),
             chat_emit: Arc::new(|_: &inbox::ReceivedChat| {}),
+            clipboard_emit: Arc::new(|_: &inbox::ReceivedClipboard| {}),
             contact_persist: Arc::new(move |key, name| {
                 sink.lock()
                     .unwrap()
@@ -953,6 +997,7 @@ mod tests {
         let second = shared.set_hooks(HubHooks {
             with_db: Arc::new(|_: &mut dyn FnMut(&mut Connection)| {}),
             chat_emit: Arc::new(|_: &inbox::ReceivedChat| {}),
+            clipboard_emit: Arc::new(|_: &inbox::ReceivedClipboard| {}),
             contact_persist: Arc::new(|_, _| {}),
             download_dir: Arc::new(|| String::new()),
             file_received: Arc::new(|_: &inbox::ReceivedFile| {}),

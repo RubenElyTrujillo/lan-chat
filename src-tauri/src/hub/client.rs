@@ -12,7 +12,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::backoff::ReconnectBackoff;
-use super::inbox::{self, ChatOutcome, FileOutcome};
+use super::inbox::{self, ChatOutcome, ClipboardOutcome, FileOutcome};
 use super::pairing_wire::{PairingWire, WireReply};
 use super::{HubShared, OutboundMsg};
 
@@ -267,6 +267,19 @@ async fn run_attempt(
                                 .get("payload")
                                 .and_then(|p| p.get("type"))
                                 .and_then(|t| t.as_str())
+                                == Some("clipboard")
+                            {
+                                // Inbound clipboard share: same
+                                // authorization + persist path as chat but
+                                // its own event (`hub-clipboard-received`
+                                // via the clipboard hook, never the chat
+                                // one). Synchronous, never a reply.
+                                handle_clipboard_relay(shared, &v);
+                                None
+                            } else if v
+                                .get("payload")
+                                .and_then(|p| p.get("type"))
+                                .and_then(|t| t.as_str())
                                 == Some("file")
                             {
                                 // Inbound file: authorized + persisted +
@@ -423,6 +436,83 @@ fn handle_chat_relay(shared: &HubShared, frame: &serde_json::Value) {
             eprintln!("Hub: chat descartado ({reason})");
         }
         None => eprintln!("Hub: chat no procesado (sin acceso a la base)"),
+    }
+}
+
+/// Inbound clipboard relay: the clipboard twin of `handle_chat_relay`.
+/// Same short-lock authorization context and the SAME synchronous DB
+/// persist path (a normal text row via `accept_text`); only the payload
+/// bound (64_000 chars) and the emit hook differ — the clipboard hook
+/// fires `hub-clipboard-received` and the chat hook is never called.
+/// Fully synchronous; failures are log-only; duplicates are silent.
+fn handle_clipboard_relay(shared: &HubShared, frame: &serde_json::Value) {
+    let Some(from_id) = frame.get("from_id").and_then(serde_json::Value::as_str) else {
+        eprintln!("Hub: clipboard sin from_id descartado");
+        return;
+    };
+    let from_sid = frame.get("from_sid").and_then(serde_json::Value::as_str);
+    let Some(payload) = frame.get("payload") else {
+        eprintln!("Hub: clipboard sin payload descartado");
+        return;
+    };
+    // Authorization inputs are snapshotted under short locks BEFORE the DB
+    // seam runs; no hub lock is held while the DB is locked.
+    let Some(peer) = shared
+        .presence()
+        .peers
+        .into_iter()
+        .find(|p| p.conn_id == from_id)
+    else {
+        eprintln!("Hub: clipboard de conn desconocida descartado");
+        return;
+    };
+    let Some(session_id) = shared.status().session_id else {
+        eprintln!("Hub: clipboard sin sesión viva descartado");
+        return;
+    };
+    let authorized = shared.conn_authorized(from_id);
+    let contact_key = shared.contact_for_conn(from_id);
+    let ctx = inbox::ChatContext {
+        session_id,
+        peer: Some(peer),
+        authorized,
+        contact_key,
+    };
+    let Some(hooks) = shared.hooks() else {
+        eprintln!("Hub: clipboard descartado (seams no instalados)");
+        return;
+    };
+    let clipboard_emit = hooks.clipboard_emit.clone();
+    let mint = || super::identity::new_uuid();
+    let mut outcome = None;
+    let mut ctx = Some(ctx);
+    (hooks.with_db)(&mut |conn: &mut Connection| {
+        // Runs strictly after `accept_text` committed: the hook can trust
+        // the row is visible (persist-before-emit is the inbox's contract).
+        let emit = |msg: &inbox::ReceivedClipboard, _conn: &Connection| clipboard_emit(msg);
+        outcome = Some(inbox::handle_clipboard_frame(
+            from_sid,
+            payload,
+            ctx.take()
+                .expect("clipboard context is consumed exactly once"),
+            &mint,
+            unix_millis(),
+            conn,
+            &emit,
+        ));
+    });
+    match outcome {
+        Some(ClipboardOutcome::Accepted(msg)) => {
+            eprintln!("Hub: clipboard entrante de {} aceptado", msg.name);
+        }
+        Some(ClipboardOutcome::Duplicate) => eprintln!("Hub: clipboard duplicado descartado"),
+        Some(ClipboardOutcome::Conflict) => {
+            eprintln!("Hub: conflicto de id en clipboard entrante")
+        }
+        Some(ClipboardOutcome::Dropped(reason)) => {
+            eprintln!("Hub: clipboard descartado ({reason})");
+        }
+        None => eprintln!("Hub: clipboard no procesado (sin acceso a la base)"),
     }
 }
 
@@ -1384,7 +1474,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use crate::history;
-    use crate::hub::inbox::{FileError, ReceivedChat, ReceivedFile};
+    use crate::hub::inbox::{FileError, ReceivedChat, ReceivedClipboard, ReceivedFile};
     use crate::hub::HubHooks;
 
     /// Real SQLite file in the OS temp dir (never in-memory), unique per call.
@@ -1430,6 +1520,7 @@ mod tests {
     struct ChatRig {
         db: Arc<Mutex<rusqlite::Connection>>,
         emits: Arc<Mutex<Vec<(ReceivedChat, usize)>>>,
+        clips: Arc<Mutex<Vec<ReceivedClipboard>>>,
         persists: Arc<Mutex<Vec<(String, String)>>>,
         dir: std::path::PathBuf,
         files: Arc<Mutex<Vec<(ReceivedFile, bool)>>>,
@@ -1453,6 +1544,7 @@ mod tests {
         let db_path = temp_chat_db(label);
         let db = Arc::new(Mutex::new(rusqlite::Connection::open(&db_path).unwrap()));
         let emits = Arc::new(Mutex::new(Vec::new()));
+        let clips = Arc::new(Mutex::new(Vec::new()));
         let persists = Arc::new(Mutex::new(Vec::new()));
         let dir = temp_download_dir(label);
         fs::create_dir_all(&dir).unwrap();
@@ -1479,6 +1571,22 @@ mod tests {
                         )
                         .unwrap();
                     log.lock().unwrap().push((msg.clone(), rows as usize));
+                })
+            },
+            clipboard_emit: {
+                let log = clips.clone();
+                let probe_path = db_path.clone();
+                Arc::new(move |msg: &ReceivedClipboard| {
+                    let probe = rusqlite::Connection::open(&probe_path).unwrap();
+                    let rows: i64 = probe
+                        .query_row(
+                            "SELECT COUNT(*) FROM messages WHERE id = ?1",
+                            rusqlite::params![msg.id],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert_eq!(rows, 1, "clipboard emit must run AFTER the row committed");
+                    log.lock().unwrap().push(msg.clone());
                 })
             },
             contact_persist: {
@@ -1511,6 +1619,7 @@ mod tests {
         ChatRig {
             db,
             emits,
+            clips,
             persists,
             dir,
             files,
@@ -1766,6 +1875,138 @@ mod tests {
             Some((emits[0].0.key.clone(), "hola".into(), 0)),
             "exactly one row is stored"
         );
+
+        sx.send(true).unwrap();
+        tokio::time::timeout(TEST_BOUND, task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    // ── Inbound clipboard dispatch ──────────────────────────────
+
+    fn clipboard_frame(from_id: &str, sid: &str, text: &str, id: &str) -> String {
+        serde_json::json!({
+            "type": "relay", "from_id": from_id, "from_name": "Ana", "from_sid": sid,
+            "payload": { "type": "clipboard", "text": text, "kind": "app", "id": id }
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn paired_clipboard_persists_row_emits_clipboard_only_then_duplicate_silent() {
+        let (listener, mut events) = event_channel();
+        let (url, mut conns) = spawn_ws_server().await;
+        let shared = Arc::new(HubShared::new(url.clone(), Some(listener)));
+        let rig = install_chat_hooks(&shared, "paired-clipboard");
+        let (sx, srx) = shutdown_channel();
+        let task = tokio::spawn(run_hub_client(
+            shared.clone(),
+            config(url, Duration::from_millis(50)),
+            srx,
+        ));
+
+        let mut ws = connect_session(&mut conns, &mut events, "self-1").await;
+        pair_web_peer(&shared, &mut events, &mut ws, "w1", "Ana", "sid-ana").await;
+
+        let frame = clipboard_frame("w1", "sid-ana", "texto copiado", "c-1");
+        ws.send(Message::text(frame.clone())).await.unwrap();
+
+        for _ in 0..400 {
+            if !rig.clips.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let clips = rig.clips.lock().unwrap().clone();
+        assert_eq!(clips.len(), 1, "exactly one clipboard event");
+        let msg = &clips[0];
+        assert_eq!(msg.name, "Ana");
+        assert_eq!(msg.text, "texto copiado");
+        assert_eq!(msg.id, "c-1");
+        assert!(msg.key.starts_with("hub:"));
+        assert_eq!(
+            row_of(&rig, "c-1"),
+            Some((msg.key.clone(), "texto copiado".into(), 0)),
+            "stored as a NORMAL text row under the granted contact key"
+        );
+        // The chat event is NEVER fired for a clipboard frame: the
+        // frontend owns single-entry rendering.
+        assert!(
+            rig.emits.lock().unwrap().is_empty(),
+            "clipboard must not emit the chat event"
+        );
+
+        // Exact replay: silent — no second clipboard event, no second row.
+        ws.send(Message::text(frame)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(rig.clips.lock().unwrap().len(), 1, "duplicates stay silent");
+        assert_eq!(
+            row_of(&rig, "c-1"),
+            Some((msg.key.clone(), "texto copiado".into(), 0))
+        );
+
+        // A clipboard frame never draws a reply.
+        let stray = tokio::time::timeout(Duration::from_millis(150), ws.next()).await;
+        assert!(stray.is_err(), "clipboard must not reply, got {stray:?}");
+
+        sx.send(true).unwrap();
+        tokio::time::timeout(TEST_BOUND, task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthorized_clipboard_frames_dropped_without_row_or_event() {
+        let (listener, mut events) = event_channel();
+        let (url, mut conns) = spawn_ws_server().await;
+        let shared = Arc::new(HubShared::new(url.clone(), Some(listener)));
+        let rig = install_chat_hooks(&shared, "unpaired-clipboard");
+        let (sx, srx) = shutdown_channel();
+        let task = tokio::spawn(run_hub_client(
+            shared.clone(),
+            config(url, Duration::from_millis(50)),
+            srx,
+        ));
+
+        let mut ws = connect_session(&mut conns, &mut events, "self-1").await;
+        // w1 live but NEVER paired; wz unknown entirely.
+        let peers = serde_json::json!({
+            "type": "peers",
+            "list": [{ "id": "w1", "name": "Ana", "kind": "web", "sid": "sid-ana" }]
+        });
+        ws.send(Message::text(peers.to_string())).await.unwrap();
+        let ev = tokio::time::timeout(TEST_BOUND, events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(ev, HubEvent::PresenceChanged { .. }));
+
+        ws.send(Message::text(clipboard_frame(
+            "w1", "sid-ana", "hola", "c-1",
+        )))
+        .await
+        .unwrap();
+        ws.send(Message::text(clipboard_frame(
+            "wz",
+            "sid-ghost",
+            "otra",
+            "c-9",
+        )))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(rig.clips.lock().unwrap().is_empty());
+        assert!(rig.emits.lock().unwrap().is_empty());
+        assert_eq!(
+            row_of(&rig, "c-1"),
+            None,
+            "unpaired clipboard never persists"
+        );
+        assert_eq!(row_of(&rig, "c-9"), None);
 
         sx.send(true).unwrap();
         tokio::time::timeout(TEST_BOUND, task)
@@ -2032,6 +2273,117 @@ mod tests {
             .send_text_to_contact("hub:x", "m-1", &oversized)
             .await;
         assert_eq!(res, Err("invalid-text".to_string()));
+    }
+
+    // ── Outbound clipboard: hub_send_clipboard ──────────────────
+
+    #[tokio::test]
+    async fn hub_send_clipboard_unknown_contact_is_pair_required_and_sends_no_frame() {
+        let (shared, mut ws, task, sx) = paired_session("w1").await;
+
+        let res = tokio::time::timeout(
+            TEST_BOUND,
+            shared.send_clipboard_to_contact("hub:nope", "c-1", "hola"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res, Err("pair-required".to_string()));
+
+        let stray = tokio::time::timeout(Duration::from_millis(150), ws.next()).await;
+        assert!(stray.is_err(), "no frame must be sent, got {stray:?}");
+
+        sx.send(true).unwrap();
+        tokio::time::timeout(TEST_BOUND, task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hub_send_clipboard_without_a_live_session_is_hub_unavailable() {
+        let shared = Arc::new(HubShared::new("wss://unused".into(), None));
+        let res = tokio::time::timeout(
+            TEST_BOUND,
+            shared.send_clipboard_to_contact("hub:whatever", "c-1", "hola"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res, Err("hub-unavailable".to_string()));
+    }
+
+    #[tokio::test]
+    async fn hub_send_clipboard_to_conn_absent_from_presence_is_peer_offline() {
+        let (shared, _ws, task, sx) = paired_session("w1").await;
+        let key = shared.contact_for_conn("w1").expect("grant minted a key");
+        shared.runtime.lock().unwrap().presence = Default::default();
+
+        let res = tokio::time::timeout(
+            TEST_BOUND,
+            shared.send_clipboard_to_contact(&key, "c-1", "hola"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res, Err("peer-offline".to_string()));
+
+        sx.send(true).unwrap();
+        tokio::time::timeout(TEST_BOUND, task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hub_send_clipboard_happy_path_delivers_exact_relay_frame_and_acks_sent() {
+        let (shared, mut ws, task, sx) = paired_session("w1").await;
+        let key = shared.contact_for_conn("w1").expect("grant minted a key");
+
+        let res = tokio::time::timeout(
+            TEST_BOUND,
+            shared.send_clipboard_to_contact(&key, "c-7", "hola clipboard"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res, Ok("sent".to_string()));
+
+        let frame = read_relay(&mut ws).await;
+        assert_eq!(frame["to"], "w1");
+        assert_eq!(
+            frame["payload"],
+            serde_json::json!({
+                "type": "clipboard",
+                "text": "hola clipboard",
+                "kind": "app",
+                "id": "c-7"
+            }),
+            "the exact clipboard relay payload must reach the wire"
+        );
+
+        sx.send(true).unwrap();
+        tokio::time::timeout(TEST_BOUND, task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hub_send_clipboard_rejects_empty_and_over_bound_text_before_any_state() {
+        let shared = Arc::new(HubShared::new("wss://unused".into(), None));
+        for bad in ["", "   "] {
+            let res = shared.send_clipboard_to_contact("hub:x", "c-1", bad).await;
+            assert_eq!(res, Err("invalid-text".to_string()), "input {bad:?}");
+        }
+        let over = "x".repeat(crate::clipboard::MAX_CLIPBOARD_TEXT + 1);
+        let res = shared
+            .send_clipboard_to_contact("hub:x", "c-1", &over)
+            .await;
+        assert_eq!(res, Err("invalid-text".to_string()));
+        // At the bound (after trim) it passes the gate; the session gate
+        // rejects with hub-unavailable (no link), proving gate order.
+        let exact = "x".repeat(crate::clipboard::MAX_CLIPBOARD_TEXT);
+        let res = shared
+            .send_clipboard_to_contact("hub:x", "c-1", &format!("  {exact} "))
+            .await;
+        assert_eq!(res, Err("hub-unavailable".to_string()));
     }
 
     // ── Outbound files: hub_send_file ───────────────────────────

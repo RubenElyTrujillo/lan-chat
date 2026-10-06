@@ -625,3 +625,145 @@ test("paired app text send emits a chat frame with kind web", async () => {
   assert.equal(frames[0][1].type, "chat");
   assert.equal(frames[0][1].kind, "web");
 });
+
+// ── Clipboard compartido (type "clipboard") ───────────────
+
+test("normalizeIncoming accepts a clipboard payload like chat", () => {
+  assert.deepEqual(normalizeIncoming({ type: "clipboard", text: "hola", kind: "app", id: "x" }), {
+    type: "clipboard",
+    text: "hola",
+  });
+});
+
+test("normalizeIncoming rejects invalid clipboard payloads", () => {
+  assert.equal(normalizeIncoming({ type: "clipboard" }), null);
+  assert.equal(normalizeIncoming({ type: "clipboard", text: 42 }), null);
+  assert.equal(normalizeIncoming({ type: "clipboard", text: "" }), null);
+  assert.equal(normalizeIncoming({ type: "clipboard", text: null }), null);
+});
+
+test("normalizeIncoming enforces the 64k clipboard bound", () => {
+  assert.equal(
+    normalizeIncoming({ type: "clipboard", text: "a".repeat(64_001) }),
+    null,
+    "over the bound is rejected",
+  );
+  assert.ok(
+    normalizeIncoming({ type: "clipboard", text: "a".repeat(64_000) }),
+    "exactly at the bound is accepted",
+  );
+});
+
+test("sendClipboard relays a clipboard frame before appending the outgoing entry", async () => {
+  const { sendClipboard } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "Ana"]));
+  session.select("a1");
+  const relayed = [];
+
+  const entry = sendClipboard(session, "a1", "hola Ana", {
+    relay: (to, payload) => relayed.push([to, payload]),
+  });
+
+  assert.equal(entry.mine, true);
+  assert.equal(entry.kind, "text");
+  assert.equal(entry.text, "hola Ana");
+  assert.equal(relayed.length, 1);
+  assert.equal(relayed[0][0], "a1");
+  assert.equal(relayed[0][1].type, "clipboard");
+  assert.equal(relayed[0][1].text, "hola Ana");
+  assert.equal(relayed[0][1].kind, "web");
+  assert.equal(relayed[0][1].id, entry.id, "wire id and entry id must match");
+  assert.equal(session.conversation("a1").messages.length, 1);
+});
+
+test("sendClipboard relay false is a failed enqueue: no outgoing entry is created", async () => {
+  const { sendClipboard } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "Ana"]));
+  session.select("a1");
+
+  assert.throws(
+    () => sendClipboard(session, "a1", "hola", { relay: () => false }),
+    /no-connection/,
+  );
+  assert.equal(session.conversation("a1").messages.length, 0, "nothing enqueued, nothing appended");
+});
+
+test("sendClipboard relay throw propagates and creates no outgoing entry", async () => {
+  const { sendClipboard } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "Ana"]));
+  session.select("a1");
+
+  assert.throws(
+    () =>
+      sendClipboard(session, "a1", "hola", {
+        relay: () => {
+          throw new Error("InvalidStateError");
+        },
+      }),
+    /InvalidStateError/,
+  );
+  assert.equal(session.conversation("a1").messages.length, 0, "no misleading entry after a throw");
+});
+
+test("sendClipboard to an unavailable peer refuses before relaying", async () => {
+  const { sendClipboard } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "Ana"]));
+  session.setSocketOpen(false);
+  let relayed = 0;
+
+  assert.throws(
+    () => sendClipboard(session, "a1", "hola", { relay: () => relayed++ }),
+    /peer-unavailable/,
+  );
+  assert.equal(relayed, 0, "relay must not run for an unavailable recipient");
+  assert.equal(session.conversation("a1").messages.length, 0);
+});
+
+test("sendClipboard enforces the same 64k bound as inbound", async () => {
+  const { sendClipboard } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "Ana"]));
+  session.select("a1");
+  let relayed = 0;
+
+  assert.throws(
+    () => sendClipboard(session, "a1", "a".repeat(64_001), { relay: () => relayed++ }),
+    /clipboard-too-long/,
+  );
+  assert.equal(relayed, 0, "oversized payload must not reach the relay");
+  assert.equal(session.conversation("a1").messages.length, 0);
+});
+
+test("paired app clipboard send emits a clipboard frame with kind web", async () => {
+  const { canSendTextTo, sendClipboard } = await import("../public/client-state.js");
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["a1", "App", "app"]));
+  assert.equal(canSendTextTo(session, "a1", (id) => id === "a1"), true);
+  const frames = [];
+  sendClipboard(session, "a1", "pegado", { relay: (id, frame) => frames.push([id, frame]) });
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0][0], "a1");
+  assert.equal(frames[0][1].type, "clipboard");
+  assert.equal(frames[0][1].kind, "web");
+  assert.equal(frames[0][1].text, "pegado");
+});
+
+test("incoming clipboard routes into the sender conversation like chat", () => {
+  const { session } = makeSession();
+  session.applyPeers(peersOf(["w1", "Wanda"]));
+  const entry = session.addIncoming("w1", "Wanda", {
+    type: "clipboard",
+    text: "pegado",
+    kind: "app",
+    id: "c1",
+  });
+  assert.ok(entry, "clipboard payload must be accepted");
+  assert.equal(entry.kind, "text");
+  assert.equal(entry.mine, false);
+  assert.equal(session.conversation("w1").messages[0].text, "pegado");
+  assert.equal(session.conversation("w1").unread, 1);
+});

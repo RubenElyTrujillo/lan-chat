@@ -14,7 +14,7 @@
 // DISPLAY grouping only, learned from a unique non-empty name match. Native
 // authorization (grants + inbox gates) remains the single source of truth.
 
-import type { DeviceState } from "../types";
+import type { DeviceState, History } from "../types";
 import { hubDeviceFromPeer, hubPeerKey, type HubPeer } from "./hub-presence.ts";
 
 // ── Keys ────────────────────────────────────────────────────────────────────
@@ -145,6 +145,8 @@ export function bindMintedContact(
 
 export interface HubRowsParams {
   contacts: Record<string, string>;
+  /** Persisted conversations; a stored contact renders only with messages>0 or a live binding. */
+  history: History;
   peers: HubPeer[];
   pairedConnIds: ReadonlySet<string>;
   contactForConn: ReadonlyMap<string, string>;
@@ -157,25 +159,30 @@ export interface HubRows {
 }
 
 /**
- * Contact keys become conversation rows (offline unless a live paired peer
- * is bound to them). A live peer WITH a grant and a known binding merges
- * into its contact row (single row, online); every other live peer keeps
- * the presence-only `hub-session:<conn_id>` row. Previews come later from
+ * Contact keys become conversation rows ONLY when the conversation is real
+ * (messages>0) or the contact is live (a paired peer is bound to it right
+ * now): the device list shows real conversations or live things, never
+ * empty+offline stored rows — those would be dead entries the user cannot
+ * remove. A live peer WITH a grant and a known binding merges into its
+ * contact row (single row, online); every other live peer keeps the
+ * presence-only `hub-session:<conn_id>` row. Previews come later from
  * `history[row.key]` — the contact key IS the history key.
  */
 export function buildHubRows(params: HubRowsParams): HubRows {
-  const { contacts, peers, pairedConnIds, contactForConn } = params;
+  const { contacts, history, peers, pairedConnIds, contactForConn } = params;
   const boundKeys = new Set<string>();
   for (const conn of pairedConnIds) {
     const key = contactForConn.get(conn);
     if (key && isContactKey(key)) boundKeys.add(key);
   }
-  const rows: DeviceState[] = Object.entries(contacts).map(([key, rawName]) => ({
-    key,
-    name: rawName.trim(),
-    kind: "hub" as const,
-    online: boundKeys.has(key),
-  }));
+  const rows: DeviceState[] = Object.entries(contacts)
+    .filter(([key]) => (history[key]?.length ?? 0) > 0 || boundKeys.has(key))
+    .map(([key, rawName]) => ({
+      key,
+      name: rawName.trim(),
+      kind: "hub" as const,
+      online: boundKeys.has(key),
+    }));
   const pairedKeys = new Set(boundKeys);
   for (const peer of peers) {
     const paired = pairedConnIds.has(peer.conn_id);
@@ -187,6 +194,17 @@ export function buildHubRows(params: HubRowsParams): HubRows {
 }
 
 export const HUB_PAIRED_TAG = "Vinculado";
+
+// ── Sidebar delete affordance gating ────────────────────────────────────────
+
+/**
+ * A device row earns the inline delete X only when the conversation actually
+ * exists: at least one persisted entry under its key. Presence-only hub
+ * session rows and never-chatted LAN devices have nothing to delete.
+ */
+export function canDeleteRow(history: History, key: string): boolean {
+  return (history[key]?.length ?? 0) > 0;
+}
 
 export function isGrantBacked(key: string, pairedKeys: ReadonlySet<string>): boolean {
   return pairedKeys.has(key);

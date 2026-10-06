@@ -1,10 +1,11 @@
-import { useRef } from "react";
-import { FolderOpen, Search } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { FolderOpen, Search, X } from "lucide-react";
 import type { DeviceState, Entry, History } from "../types";
-import { HUB_PAIRED_TAG, isContactKey } from "../lib/hub-chat-core";
+import { HUB_PAIRED_TAG, canDeleteRow, isContactKey } from "../lib/hub-chat-core";
 import { HUB_PEER_PREVIEW } from "../lib/hub-presence";
 import { Avatar } from "./Avatar";
 import { Menu } from "./Menu";
+import { useDismiss } from "./useDismiss";
 
 const DAY = 86_400_000;
 
@@ -24,7 +25,12 @@ function Row({
   selected,
   entering,
   delay,
+  canDelete,
+  confirming,
   onSelect,
+  onAskDelete,
+  onConfirmDelete,
+  onCancelDelete,
 }: {
   device: DeviceState;
   entry?: Entry;
@@ -32,44 +38,89 @@ function Row({
   selected: boolean;
   entering: boolean;
   delay: number;
+  canDelete: boolean;
+  confirming: boolean;
   onSelect: () => void;
+  onAskDelete: () => void;
+  onConfirmDelete: () => void;
+  onCancelDelete: () => void;
 }) {
   const isHub = device.kind === "hub";
   const isContact = isContactKey(device.key);
   const showsConversation = !isHub || isContact;
   const hubName = isHub ? device.name || "Navegador" : device.name;
+
+  const confirmRef = useRef<HTMLDivElement>(null);
+  const confirmBtnRef = useRef<HTMLButtonElement>(null);
+  useDismiss(confirmRef, confirming, onCancelDelete);
+
+  useEffect(() => {
+    if (confirming) confirmBtnRef.current?.focus();
+  }, [confirming]);
+
+  const classes = `device-row ${selected ? "is-selected" : ""} ${entering ? "is-entering" : ""} ${
+    device.online ? "" : "is-offline"
+  } ${confirming ? "is-confirm" : ""}`;
+
   return (
-    <button
-      type="button"
-      className={`device-row ${selected ? "is-selected" : ""} ${entering ? "is-entering" : ""} ${
-        device.online ? "" : "is-offline"
-      }`}
+    <div
+      className={classes}
       style={delay ? { animationDelay: `${delay}ms` } : undefined}
-      aria-current={selected ? "true" : undefined}
-      onClick={onSelect}
+      ref={confirming ? confirmRef : undefined}
     >
-      <Avatar name={hubName} online={device.online} />
-      <span className="device-text">
-        <span className="device-name">
-          {hubName}
-          {isHub && !isContact && device.name && <span className="hub-tag">Navegador</span>}
-          {paired && <span className="hub-tag">{HUB_PAIRED_TAG}</span>}
-        </span>
-        <span className="device-preview">
-          {showsConversation
-            ? device.online || entry
-              ? entry
-                ? `${entry.mine ? "Vos: " : ""}${entry.text}`
-                : "Sin mensajes todavía"
-              : "Desconectado"
-            : // Presencia del hub: solo avisar, sin prometer conversación.
-              HUB_PEER_PREVIEW}
-        </span>
-      </span>
-      {entry && showsConversation && (
-        <span className="device-time">{previewTime(entry.at)}</span>
+      {confirming ? (
+        <>
+          <span className="device-del-q">¿Borrar?</span>
+          <button type="button" ref={confirmBtnRef} className="pill device-del-yes" onClick={onConfirmDelete}>
+            Borrar
+          </button>
+          <button type="button" className="device-del-no" onClick={onCancelDelete}>
+            Cancelar
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="device-row-main"
+            aria-current={selected ? "true" : undefined}
+            onClick={onSelect}
+          >
+            <Avatar name={hubName} online={device.online} />
+            <span className="device-text">
+              <span className="device-name">
+                {hubName}
+                {isHub && !isContact && device.name && <span className="hub-tag">Navegador</span>}
+                {paired && <span className="hub-tag">{HUB_PAIRED_TAG}</span>}
+              </span>
+              <span className="device-preview">
+                {showsConversation
+                  ? device.online || entry
+                    ? entry
+                      ? `${entry.mine ? "Vos: " : ""}${entry.text}`
+                      : "Sin mensajes todavía"
+                    : "Desconectado"
+                  : // Presencia del hub: solo avisar, sin prometer conversación.
+                    HUB_PEER_PREVIEW}
+              </span>
+            </span>
+            {entry && showsConversation && (
+              <span className="device-time">{previewTime(entry.at)}</span>
+            )}
+          </button>
+          {canDelete && (
+            <button
+              type="button"
+              className="device-del"
+              aria-label={`Borrar conversación con ${hubName}`}
+              onClick={onAskDelete}
+            >
+              <X size={14} aria-hidden />
+            </button>
+          )}
+        </>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -85,6 +136,7 @@ export function DeviceList({
   downloadFolder,
   onRegeneratePin,
   onDeleteAll,
+  onDeleteConversation,
 }: {
   devices: DeviceState[];
   history: History;
@@ -97,10 +149,31 @@ export function DeviceList({
   downloadFolder: string;
   onRegeneratePin: () => void;
   onDeleteAll: () => void;
+  onDeleteConversation: (key: string) => void;
 }) {
   const knownRef = useRef<Set<string> | null>(null);
   const enteringRef = useRef<Set<string>>(new Set());
   const delayRef = useRef<Map<string, number>>(new Map());
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+
+  // Solo una fila confirma a la vez: abrir otra (o elegir la conversación de
+  // otra fila) cancela la confirmación pendiente.
+  const cancelConfirm = useCallback(() => setConfirmKey(null), []);
+  const handleSelect = useCallback(
+    (key: string) => {
+      setConfirmKey(null);
+      onSelect(key);
+    },
+    [onSelect],
+  );
+  const askDelete = useCallback((key: string) => setConfirmKey(key), []);
+  const confirmDelete = useCallback(
+    (key: string) => {
+      setConfirmKey(null);
+      onDeleteConversation(key);
+    },
+    [onDeleteConversation],
+  );
 
   if (knownRef.current === null) {
     knownRef.current = new Set();
@@ -194,7 +267,12 @@ export function DeviceList({
               selected={d.key === selectedKey}
               entering={enteringRef.current.has(d.key)}
               delay={delayRef.current.get(d.key) ?? 0}
-              onSelect={() => onSelect(d.key)}
+              canDelete={canDeleteRow(history, d.key)}
+              confirming={confirmKey === d.key}
+              onSelect={() => handleSelect(d.key)}
+              onAskDelete={() => askDelete(d.key)}
+              onConfirmDelete={() => confirmDelete(d.key)}
+              onCancelDelete={cancelConfirm}
             />
           );
         })}
