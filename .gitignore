@@ -31,3 +31,6 @@ src-tauri/gen/schemas
 .atl/
 .impeccable/
 .playwright-mcp/
+
+# Local verification evidence (never public)
+evidence/

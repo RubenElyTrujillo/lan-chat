@@ -1,12 +1,13 @@
 use rusqlite::Connection;
 
-/// Resolves the hub URL. `LANCHAT_HUB_URL` overrides the production default
-/// (local test servers use plain ws:// through this exact override).
-pub fn resolve_hub_url(env_value: Option<&str>) -> String {
-    match env_value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) => v.to_string(),
-        None => "wss://lan-chat.nerdalab.tech/hub".to_string(),
-    }
+/// Resolves the hub URL from `LANCHAT_HUB_URL` (trimmed, non-empty). `None`
+/// means no hub is configured: public builds run LAN-only by default and an
+/// operator opts in per machine via the env var (private hub deployments).
+pub fn resolve_hub_url(env_value: Option<&str>) -> Option<String> {
+    env_value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 /// Formats 16 random bytes as canonical UUIDv4 text (no external uuid crate).
@@ -58,19 +59,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_hub_url_is_production_wss() {
-        assert_eq!(resolve_hub_url(None), "wss://lan-chat.nerdalab.tech/hub");
+    fn hub_url_is_none_by_default_no_baked_endpoint() {
+        assert_eq!(resolve_hub_url(None), None, "public default is LAN-only");
+        assert_eq!(
+            resolve_hub_url(Some("   ")),
+            None,
+            "whitespace-only counts as unset"
+        );
     }
 
     #[test]
     fn env_override_wins_and_trims() {
         assert_eq!(
             resolve_hub_url(Some("  ws://localhost:8788/hub ")),
-            "ws://localhost:8788/hub"
-        );
-        assert_eq!(
-            resolve_hub_url(Some("   ")),
-            "wss://lan-chat.nerdalab.tech/hub"
+            Some("ws://localhost:8788/hub".to_string())
         );
     }
 

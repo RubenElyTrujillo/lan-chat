@@ -18,12 +18,13 @@ LAN-Chat lets devices on the same LAN discover each other and exchange content a
 
 ## Positioning
 
-Two apps, one protocol: a desktop app and a web app that speak the same local-network protocol, so the receiving side needs no install (web) or no browser (desktop). Messages never leave the LAN. Neighboring products (AirDrop, SendAnywhere, cloud clipboard syncs) cannot truthfully claim "no internet, no server, no account, works cross-platform via browser."
+Two apps, one protocol: a desktop app and a web app that speak the same protocol, so the receiving side needs no install (web) or no browser (desktop). By default traffic stays on the LAN; an optional hub relay is opt-in via configuration. Neighboring products (AirDrop, SendAnywhere, cloud clipboard syncs) cannot truthfully claim "no accounts, works cross-platform via browser."
 
 ## Operating Context
 
 - Devices share a LAN/wifi; no internet connectivity required at all.
 - Each desktop instance announces itself over mDNS (`_lanchat._tcp.local.`) and listens on TCP port 8787.
+- Optional hub mode: setting `LANCHAT_HUB_URL` connects the desktop app to a hub relay (private deployments only; the public default is LAN-only, hub disabled).
 - macOS dev environment today; bundle targets "all" desktop platforms.
 - `DEVICE_NAME` env var overrides the announced name (used to test multiple instances on one machine).
 
@@ -46,7 +47,7 @@ Two apps, one protocol: a desktop app and a web app that speak the same local-ne
 
 ## Brand Commitments
 
-- **Privacy / no internet** is a binding product promise: content must never transit anything outside the local network.
+- **Privacy / local-first** is a binding product promise: by default content never leaves the LAN — no accounts, no cloud, no telemetry. The optional hub is strictly opt-in via `LANCHAT_HUB_URL`; the app is fully functional without it.
 - Name: LAN-Chat (identifier `com.rubenely.lanchat`). No logo or visual identity assets exist yet (icons are Tauri template defaults).
 - **Craft bar (user, standing):** WhatsApp / Telegram Desktop — the UI must sit alongside mass-market chat apps at their finish level. Pinned visual direction: modern soft messenger — light surfaces, pastel bubbles, large radii, black pill primary actions, clean grotesque.
 
@@ -57,7 +58,7 @@ Two apps, one protocol: a desktop app and a web app that speak the same local-ne
 
 ## Product Principles
 
-1. **Local-first, always.** Nothing leaves the LAN: no accounts, no cloud, no telemetry. Features that would require internet are out of scope by definition.
+1. **Local-first, always.** The default experience is LAN-only: no accounts, no cloud, no telemetry. The hub is an opt-in relay (operator-trusted), never a requirement.
 2. **Discovery should feel like magic.** Finding the other device must be automatic and instant — the user never configures IPs or ports.
 3. **The user owns the history.** Chat history persists until the user deletes it, one chat or all of them, and deletion is real.
 4. **Two doors, one protocol.** Desktop and web apps are equal citizens of the same wire contract; never break one to favor the other.

@@ -269,7 +269,7 @@ test("Spanish labels match the approved hub states", () => {
   );
   assert.equal(
     hubStatusLabel({ kind: "status", status: STATUS({ phase: "disabled", connected: false }) }),
-    "Hub no disponible",
+    "Hub no configurado",
   );
   assert.equal(hubStatusLabel({ kind: "connecting" }), "Conectando al hub");
   assert.equal(hubStatusLabel({ kind: "unavailable" }), "Hub no disponible");
@@ -293,4 +293,15 @@ test("titles are honest and generic: active link, no chat over the hub, no raw e
   assert.doesNotMatch(unavailable, /hub down/);
   const demo = hubStatusTitle({ kind: "demo" });
   assert.match(demo, /demo/i);
+});
+
+test("disabled chip is honest: hub not configured, LAN-only until env var", () => {
+  assert.equal(
+    hubStatusLabel({ kind: "status", status: STATUS({ phase: "disabled", connected: false }) }),
+    "Hub no configurado",
+  );
+  const t = hubStatusTitle({ kind: "status", status: STATUS({ phase: "disabled", connected: false }) });
+  assert.match(t, /Hub no configurado/);
+  assert.match(t, /modo red local/);
+  assert.match(t, /LANCHAT_HUB_URL/);
 });

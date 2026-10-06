@@ -126,7 +126,7 @@ export function hubStatusLabel(state: HubUiState): string {
         case "backoff":
           return "Reintentando hub";
         case "disabled":
-          return "Hub no disponible";
+          return "Hub no configurado";
       }
   }
 }
@@ -172,7 +172,7 @@ export function hubStatusTitle(state: HubUiState): string {
         case "backoff":
           return "Sin enlace con el hub; reintento automático en curso";
         case "disabled":
-          return "El hub está deshabilitado en este equipo";
+          return "Hub no configurado — modo red local. Conectá un hub con LANCHAT_HUB_URL.";
       }
   }
 }

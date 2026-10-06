@@ -1228,7 +1228,9 @@ pub fn run() {
 
             // Hub: identidad estable -> estado compartido -> loop del cliente.
             // Un fallo de identidad deshabilita SOLO el hub (estado + log);
-            // el resto de la app (LAN, historial) sigue igual.
+            // el resto de la app (LAN, historial) sigue igual. Sin
+            // LANCHAT_HUB_URL el hub arranca deshabilitado (hub-not-configured):
+            // el default público es LAN-only.
             let hub_url =
                 hub::identity::resolve_hub_url(std::env::var("LANCHAT_HUB_URL").ok().as_deref());
             let hub_identity = hub::decide_identity(hub::identity::read_or_create_device_id(&conn));
@@ -1236,7 +1238,7 @@ pub fn run() {
                 eprintln!("Hub deshabilitado: {reason}");
             }
             let hub_state_app = app.handle().clone();
-            let hub_listener_url = hub_url.clone();
+            let hub_listener_url = hub_url.clone().unwrap_or_default();
             let hub_listener: hub::HubListener = Arc::new(move |event| {
                 match event {
                     // Presencia: el snapshot de pares va por `hub-presence`;

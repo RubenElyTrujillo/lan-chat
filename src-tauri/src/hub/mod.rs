@@ -204,16 +204,18 @@ pub struct HubStartup {
 
 /// Builds the hub startup bundle. `listener` receives every state-transition
 /// event (production wiring forwards it to the `hub-state` Tauri event).
+/// `None` url means no hub is configured (`LANCHAT_HUB_URL` unset): the hub
+/// is disabled with reason `hub-not-configured` and no client loop is built.
 pub fn build_startup(
-    url: String,
+    url: Option<String>,
     name: String,
     identity: HubIdentity,
     listener: Option<HubListener>,
 ) -> HubStartup {
-    let shared = HubShared::new(url.clone(), listener);
+    let shared = HubShared::new(url.clone().unwrap_or_default(), listener);
     let (shutdown, rx) = self::client::shutdown_channel();
-    let client = match identity {
-        HubIdentity::Enabled { device_id } => Some((
+    let client = match (url, identity) {
+        (Some(url), HubIdentity::Enabled { device_id }) => Some((
             HubClientConfig {
                 url,
                 name,
@@ -222,8 +224,12 @@ pub fn build_startup(
             },
             rx,
         )),
-        HubIdentity::Disabled { reason } => {
+        (_, HubIdentity::Disabled { reason }) => {
             shared.set_disabled(reason);
+            None
+        }
+        (None, HubIdentity::Enabled { .. }) => {
+            shared.set_disabled("hub-not-configured".to_string());
             None
         }
     };
@@ -727,7 +733,7 @@ mod tests {
     #[test]
     fn build_startup_enabled_carries_actual_name_url_and_stable_id() {
         let startup = build_startup(
-            "wss://hub.test/hub".into(),
+            Some("wss://hub.test/hub".into()),
             "Mesa-Fixed".into(),
             HubIdentity::Enabled {
                 device_id: "stable-1".into(),
@@ -748,10 +754,30 @@ mod tests {
     }
 
     #[test]
+    fn build_startup_without_hub_url_disables_as_not_configured() {
+        let startup = build_startup(
+            None,
+            "Mesa-Fixed".into(),
+            HubIdentity::Enabled {
+                device_id: "stable-1".into(),
+            },
+            None,
+        );
+        assert!(
+            startup.client.is_none(),
+            "no configured hub must never spawn a client loop"
+        );
+        let st = startup.shared.status();
+        assert_eq!(st.phase, HubPhase::Disabled);
+        assert!(!st.connected);
+        assert_eq!(st.reason.as_deref(), Some("hub-not-configured"));
+    }
+
+    #[test]
     fn build_startup_identity_failure_disables_only_hub_without_client() {
         let (listener, log) = capture();
         let startup = build_startup(
-            "wss://hub.test/hub".into(),
+            Some("wss://hub.test/hub".into()),
             "Mesa-Fixed".into(),
             HubIdentity::Disabled {
                 reason: "device id unavailable: locked".into(),

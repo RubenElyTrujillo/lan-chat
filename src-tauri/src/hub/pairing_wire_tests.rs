@@ -101,8 +101,9 @@ fn presence(peers: &[(&str, &str)]) -> HubPresenceSnapshot {
     }
 }
 
-/// Exact hub relay shape: web/server.js stamps `from_id`/`from_name` and
-/// `from_sid` only when the conn announced one; no sid = absent stamp.
+/// Exact hub relay shape: the private hub server implementation stamps
+/// `from_id`/`from_name` and `from_sid` only when the conn announced one; no
+/// sid = absent stamp. Wire contract documented in the private hub repo.
 fn relay(from: &str, payload: Value) -> Value {
     json!({
         "type": "relay",

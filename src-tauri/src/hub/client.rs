@@ -26,9 +26,10 @@ const REPLY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Client knobs. `Default` uses the production secure URL (LANCHAT_HUB_URL
-/// override honored), 10 s connect/welcome bounds and entropy-jittered
-/// reconnect backoff. Tests build it with short durations instead.
+/// Client knobs. `Default` uses the LANCHAT_HUB_URL override (empty url when
+/// unset — the wiring layer never starts this client without a configured
+/// hub), 10 s connect/welcome bounds and entropy-jittered reconnect backoff.
+/// Tests build it with short durations instead.
 pub struct HubClientConfig {
     pub url: String,
     /// Display name announced in hello; the hub truncates it to 24 chars.
@@ -45,7 +46,8 @@ pub struct HubClientConfig {
 impl Default for HubClientConfig {
     fn default() -> Self {
         Self {
-            url: super::identity::resolve_hub_url(std::env::var("LANCHAT_HUB_URL").ok().as_deref()),
+            url: super::identity::resolve_hub_url(std::env::var("LANCHAT_HUB_URL").ok().as_deref())
+                .unwrap_or_default(),
             name: "desktop".into(),
             device_id: String::new(),
             connect_timeout: CONNECT_TIMEOUT,
