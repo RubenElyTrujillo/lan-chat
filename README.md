@@ -47,6 +47,17 @@ Installers must be built **on each target OS** — cross-compilation is not supp
 
 Output lands in `src-tauri/target/release/bundle/`. The binaries are unsigned, so the first run may trigger an OS warning (Gatekeeper, SmartScreen, etc.) — this is normal for unsigned local builds.
 
+How to open the app on each OS:
+
+- **macOS**: after installing, macOS (Sequoia in particular) may report the app as "damaged". The app is fine — Gatekeeper just quarantines unsigned downloads. Clear the flag and open normally:
+
+  ```bash
+  xattr -cr /Applications/lan-chat.app
+  ```
+
+- **Windows**: SmartScreen shows "Windows protected your PC" — click **More info** → **Run anyway**.
+- **Linux**: there are no signature checks; if the AppImage doesn't start, make it executable with `chmod +x`.
+
 ## Optional: Hub mode
 
 By default LAN-Chat is a pure LAN application — no hub is configured and nothing leaves your network. To bridge browsers and other networks, point the app at a hub relay with the `LANCHAT_HUB_URL` environment variable:
