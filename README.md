@@ -55,7 +55,7 @@ How to open the app on each OS:
   xattr -cr /Applications/lan-chat.app
   ```
 
-- **Windows**: SmartScreen shows "Windows protected your PC" — click **More info** → **Run anyway**.
+- **Windows**: SmartScreen shows "Windows protected your PC" — click **More info** → **Run anyway**. The Windows installer adds its firewall rules automatically (LAN-Chat + mDNS UDP 5353); they are removed on uninstall.
 - **Linux**: there are no signature checks; if the AppImage doesn't start, make it executable with `chmod +x`.
 
 ## Optional: Hub mode
